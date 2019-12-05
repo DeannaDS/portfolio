@@ -13,12 +13,12 @@ This project was completed to give a high-level understanding of the textual res
 ## Master's Program Class Projects
 
 ### Time Series Modeling
-This project was completed as the final requirement of DS705 - Foundations of Data Science. It presents a time series modeling approach to predictive analytics.
+This project was completed as the final requirement of DS700 - Foundations of Data Science. It presents a time series modeling approach to predictive analytics.
 
 [View the Project](timeseriesanalysis)
 
 ### Loan Classification using Machine Learning
-This project was completed as the final requirement for DS710 - Statistical Methods. It uses a classification model to predict loan default.
+This project was completed as the final requirement for DS705 - Statistical Methods. It uses a classification model to predict loan default.
 
 [View the Project](LoanAnalysis)
  
