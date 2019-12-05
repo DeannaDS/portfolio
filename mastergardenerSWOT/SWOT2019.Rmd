@@ -1,0 +1,885 @@
+---
+title: "UW-Madison Division of Extension Master Gardener SWOT Survey Analysis"
+author: "Deanna Schneider"
+date: "April 23, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F,
+                      warning=F,
+                      error=F,
+                      message=F,
+                      results='hide')
+```
+
+##Background and Data Collection
+Data was collected via a Qualtrics survey. Individuals identified their role, years experience, gender, and age and what they perceive as the strengths, weaknesses, threats and opportunities in the Master Gardener Program. 
+
+```{r loadPackages}
+#install_github("cbail/textnets")
+pacman::p_load('readr','tm', 'topicmodels', 'SnowballC', 'servr', 'stringi', 'LDAvis', 'ggplot2', 'devtools', 
+               'dplyr', 'Matrix', 'tidytext', 'stringr','reshape2', 'phrasemachine', 'igraph', 'ggraph', 'networkD3', 
+               'udpipe', 'wordcloud','gridExtra','grid','knitr','textstem','BiocManager', 'openNLP','tidyr')
+
+```
+
+```{r fetchData}
+#read in the data. This only works with read_delim, because of weird characters
+responses <- read_delim(file='SWOT.csv', delim ='|')
+
+
+#clean up the non graphical characters: https://stackoverflow.com/questions/9637278/r-tm-package-invalid-input-in-utf8towcs
+responses$Strengths <- tolower(iconv(responses$Strengths, "latin1", "ASCII", ""))
+responses$Weaknesses <- tolower(iconv(responses$Weaknesses, "latin1", "ASCII", ""))
+responses$Opportunities <- tolower(iconv(responses$Opportunities, "latin1", "ASCII", ""))
+responses$Threats <- tolower(iconv(responses$Threats, "latin1", "ASCII", ""))
+
+#clean up the march thing
+responses$YearsExperience[which(responses$YearsExperience == 43595)] <- '5-10'
+
+```
+###Basic Information
+The dataset contained 881 responses. Not all responses contained data for all questions.
+
+The majority of respondents were female.
+
+```{r}
+ggplot(responses, aes(x=factor(Gender)))+
+         geom_bar(stat="count", fill="#9b0000") +
+        ggtitle("Distribution of Responses By Gender") +
+        xlab('Gender') +
+        theme_classic()
+```
+
+
+The majority of respondents had less than 5 years experience.
+
+```{r}
+ggplot(responses, aes(x=factor(YearsExperience)))+
+         geom_bar(stat="count", fill="#9b0000") +
+        ggtitle("Distribution of Responses By Years of Experience") +
+        xlab('Years of Experience') +
+        theme_classic()
+```
+
+An overwhelming number of respondents were Master Gardener Volunteers.
+
+```{r}
+ggplot(responses, aes(x=factor(Role)))+
+         geom_bar(stat="count", fill="#9b0000") +
+        ggtitle("Distribution of Responses By Role") +
+        xlab('Role') +
+      coord_flip() +
+        theme_classic()
+```
+
+The majority of the respondents are older than 65.
+
+```{r}
+ggplot(responses, aes(x=factor(Age)))+
+         geom_bar(stat="count", fill="#9b0000") +
+        ggtitle("Distribution of Responses By Age") +
+        xlab('Age Group') +
+        theme_classic()
+```
+
+##Preparing for Textual Analysis
+Two kinds of text analysis were completed - topic modeling and term frequency-inverse document frequency weighting. In order to prepare the data for this analysis, the analyst:
+
+* converted all of the data to plain lowercase text
+* removed common words (the, of, is, master, garden, etc.)
+* identified parts of speech 
+* retained nouns and proper nouns
+
+```{r}
+#get the stopwords from snowball
+stops <- get_stopwords(language="en")
+#get our custom stopwords
+stopwords <- read.csv('stopwords.csv')
+#add the extra column for lexicon
+stopwords$lexicon <- 'UWEX'
+#join the stopwords
+stopwords <- rbind(stops, stopwords)
+
+
+
+cleanData <- function(textdata, textvar, groupvar, stopwords, model){
+  # set up udpipe language model for pos tagging
+  udmodel_lang <- udpipe_load_model(file = lang_mod$file_model)
+  
+
+  #clean up urls
+  textdata[[textvar]] <-  gsub("http[[:alnum:]]*", "", textdata[[textvar]])
+  #get rid of numbers
+  textdata[[textvar]]<-gsub('[[:digit:]]+', "",textdata[[textvar]])
+  #replace punctuation with a space
+  textdata[[textvar]]<-gsub('[[:punct:]]+', " ",textdata[[textvar]])
+
+  
+  # we use tidytext to flexibly tokenize words or tweets
+    textdata_tokens <- as_tibble(textdata) %>%
+      select(groupvar, textvar) %>%
+      unnest_tokens_(output = "word", input = textvar, token = "words", strip_punct = FALSE)
+    
+    # then we prepare the tokenized documents for dependency parsing
+    textdata_tokens <- textdata_tokens %>% 
+      group_by_(groupvar) %>% 
+      summarise(documents = paste(word, collapse = "\n"))
+    
+    # parse dependencies with udpipe
+    textdata_dep <- as.data.frame(udpipe_annotate(udmodel_lang, x = textdata_tokens$documents,
+                                                  doc_id = textdata_tokens[[groupvar]],
+                                                  tagger = "default", parser = "default"))
+    
+    # rename df and groupvar to avoid redudant coding
+    textdata <- textdata_dep
+    names(textdata)[1] <- groupvar
+    
+    #filter to just nouns and proper nouns
+    textdata <- textdata %>% 
+      filter(upos%in%c("NOUN", "PROPN"))
+    
+     #remove stopwords
+    textdata <- textdata %>% 
+      anti_join(stopwords, by = c("lemma" = "word"))
+    
+    #we still need to remove our custom stopwords (counties) from the compound nouns
+    #fetch each word in our stop words dataframe
+    words_d <- as.vector(stopwords[which(stopwords$lexicon=='UWEX'), 1])
+    words_v <- words_d[['word']]
+    
+    #for testing
+    #textdata2 <- textdata
+    
+    '%nin%' <- Negate('%in%')
+    lemma2 <- lapply(textdata[,7], function(x) {
+          t <- unlist(strsplit(x, " "))
+          out <-  ''
+          for (word in t){
+          if(word %nin% words_v){
+            out <- paste(out, word, sep = " ")
+          }
+          }
+          return(trimws(out, which='both'))
+      })
+    
+
+    textdata$lemma <- as.character(lemma2)
+    
+    textdata <-  textdata %>%  
+    group_by(ID) %>%
+    mutate(words = paste0(lemma, collapse=" ")) 
+    
+    textdata <- unique(textdata[, c('ID', 'words')])
+    
+    textdata$ID <- as.numeric(textdata$ID)
+    
+    return(textdata)
+}
+
+# download udpipe language model
+lang_mod <- udpipe_download_model(language = 'english')
+
+#clean the data and pass back just the cleaned segments and IDs
+strengths= cleanData(responses, textvar = "Strengths", groupvar = "ID", stopwords=stopwords, model=lang_mod)
+weaknesses= cleanData(responses, textvar = "Weaknesses", groupvar = "ID", stopwords=stopwords, model=lang_mod)
+opps= cleanData(responses, textvar = "Opportunities", groupvar = "ID", stopwords=stopwords, model=lang_mod)
+threats = cleanData(responses, textvar = "Threats", groupvar = "ID", stopwords=stopwords, model=lang_mod)
+
+
+
+
+#cleanup
+rm(stops, cleanData)
+
+```
+
+
+
+
+```{r dataCleaning1}
+
+
+#make a corpus based off each column
+create_corpus <- function(data){
+  
+  #testing data <- strengths$words
+  
+  #create a corpus
+  docs <- Corpus(VectorSource(data))
+  
+  #create a dtm
+  dtm <- DocumentTermMatrix(docs)
+  #sum the rows
+  rowTotals <- apply(dtm , 1, sum)
+  #find the empties
+  empty.rows <- dtm[rowTotals == 0, ]$dimnames[1][[1]]
+  if (!is.null(empty.rows)){
+      #remove them
+      docs <- docs[-as.numeric(empty.rows)]
+  }
+
+  
+  return(docs)
+}
+
+
+
+strengths_docs <- create_corpus(strengths$words)
+weaknesses_docs <- create_corpus(weaknesses$words)
+opps_docs <- create_corpus(opps$words)
+threats_docs <- create_corpus(threats$words)
+
+
+```
+
+After preparation, we had the following number of responses for each question. Note that overall, people had more to say about the programs strengths than any of the other topics.
+
+```{r results='show'}
+counts <- data.frame('Question' = c('Strengths', 'Weaknesses', 'Opportunities', 'Threats'), 'Total Responses' = c(
+  nrow(strengths), nrow(weaknesses), nrow(opps), nrow(threats)))
+
+kable(counts, digits=0)
+```
+
+
+
+```{r getFreqs}
+#Create document-term matrixes
+strengths_dtm <- DocumentTermMatrix(strengths_docs)
+weaknesses_dtm <- DocumentTermMatrix(weaknesses_docs)
+opps_dtm <- DocumentTermMatrix(opps_docs)
+threats_dtm <- DocumentTermMatrix(threats_docs)
+
+
+
+```
+
+
+
+```{r runLDA, eval=F}
+
+##########################
+# This function lets me run lda and pass back data with various K
+##########################
+testK <- function(dtm, k, numTerms=10, write=F){
+  
+  #clean up any sparse terms
+  #raw.sum=apply(dtm,1,FUN=sum)
+  #dtm=dtm[raw.sum!=0,]
+  
+  
+  #Set parameters for Gibbs sampling - these parameters control how many gibbs sampling draws are made
+  burnin <- 1000
+  iter <- 1000
+  thin <- 100
+  nstart <- 5
+  seed <- rep(2, nstart)
+  best <- TRUE
+  
+  
+  #Run LDA using Gibbs sampling ********************* Item to pass back
+  ldaOut <- LDA(dtm,k, method="Gibbs", control=list(nstart=nstart,
+                                                    seed = seed,
+                                                    best=best,
+                                                    burnin = burnin,
+                                                    iter = iter))
+  
+  #get the topics as a matrix 
+  topics <- as.matrix(topics(ldaOut)) #***************** Item to pass back
+
+  
+  
+  #top n terms in each topic (defaults to 10)
+  topTerms <- as.matrix(terms(ldaOut,numTerms)) #************************* Item to pass back
+
+  
+  #probabilities associated with each topic assignment
+  probabilities <- as.data.frame(ldaOut@gamma) #******************* Item to pass back
+  
+  #write to file if requested
+  if(write == TRUE){
+      write.csv(probabilities,
+            file=paste("LDAGibbs",k,"TopicProbabilities.csv",sep="_"))
+  write.csv(topics,file=paste("LDAGibbs",k,"DocsToTopics.csv",sep="_"))
+  write.csv(topTerms,file=paste("LDAGibbs",k,"TopTenTopics.csv",sep="_"))
+  }
+
+
+results <- list(ldaOut=ldaOut,topics=topics, topTerms = topTerms, probabilities = probabilities, freq=colSums(as.matrix(dtm)))
+
+return(results)
+}
+
+```
+
+```{r strengths, eval=F}
+
+#get some number of topics 
+
+s_lda4 <- testK(strengths_dtm, 4, 10)
+s_lda4$topTerms
+s_lda5 <- testK(strengths_dtm, 5, 10)
+s_lda5$topTerms
+s_lda6 <- testK(strengths_dtm, 6, 10)
+s_lda6$topTerms
+
+```
+
+
+
+
+```{r vizSetup, eval=F}
+###################################################
+# Visualizing the topic models
+###################################################
+## ----echo=FALSE, warning=FALSE-------------------------------------------
+topicmodels_json_ldavis <- function(fitted, corpus, doc_term) {
+  # Find required quantities
+  phi <- posterior(fitted)$terms %>% as.matrix
+  theta <- posterior(fitted)$topics %>% as.matrix
+  vocab <- colnames(phi)
+  
+  doc_length <- vector()
+  
+  for (i in 1:length(corpus)) {
+    temp <- paste(corpus[[i]]$content, collapse = ' ')
+    doc_length <- c(doc_length, stri_count(temp, regex = '\\S+'))
+  }
+  
+  # Convert to json
+  json_lda <- LDAvis::createJSON(phi = phi, theta=theta,
+                                 vocab = vocab,
+                                 doc.length = doc_length,
+                                 term.frequency = doc_term)
+  #freq_matrix$Freq
+  return(json_lda)
+}
+
+
+```
+
+
+
+```{r vizs4, eval=F}
+###now provide values and run the function
+json4 <- topicmodels_json_ldavis(s_lda4$ldaOut, strengths_docs, s_lda4$freq )
+serVis(json4, out.dir = 's_vis4', open.browser = TRUE)
+
+```
+
+```{r vizs5, eval=F}
+###now provide values and run the function
+json5 <- topicmodels_json_ldavis(s_lda5$ldaOut, strengths_docs, s_lda5$freq )
+serVis(json5, out.dir = 's_vis5', open.browser = TRUE)
+
+```
+
+```{r vizs6, eval=F}
+###now provide values and run the function
+json6 <- topicmodels_json_ldavis(s_lda6$ldaOut, strengths_docs, s_lda6$freq )
+serVis(json6, out.dir = 's_vis6', open.browser = TRUE)
+
+```
+
+```{r weaknesses, eval=F}
+#get some number of topics 
+
+w_lda4 <- testK(weaknesses_dtm, 4, 10)
+w_lda4$topTerms
+w_lda5 <- testK(weaknesses_dtm, 5, 10)
+w_lda5$topTerms
+w_lda6 <- testK(weaknesses_dtm, 6, 10)
+w_lda6$topTerms
+
+```
+
+```{r vizw4, eval=F}
+###now provide values and run the function
+json4 <- topicmodels_json_ldavis(w_lda4$ldaOut, weaknesses_docs, w_lda4$freq )
+serVis(json4, out.dir = 'w_vis4', open.browser = TRUE)
+
+```
+
+```{r vizw5, eval=F}
+###now provide values and run the function
+json5 <- topicmodels_json_ldavis(w_lda5$ldaOut, weaknesses_docs, w_lda5$freq )
+serVis(json5, out.dir = 'w_vis5', open.browser = TRUE)
+
+```
+
+```{r vizw6, eval=F}
+###now provide values and run the function
+json6 <- topicmodels_json_ldavis(w_lda6$ldaOut, weaknesses_docs, w_lda6$freq )
+serVis(json6, out.dir = 'w_vis6', open.browser = TRUE)
+
+```
+
+```{r opps, eval=F}
+#get some number of topics 
+o_lda4 <- testK(opps_dtm, 4, 10)
+o_lda4$topTerms
+o_lda5 <- testK(opps_dtm, 5, 10)
+o_lda5$topTerms
+o_lda6 <- testK(opps_dtm, 6, 10)
+o_lda6$topTerms
+
+```
+
+```{r vizo4, eval=F}
+###now provide values and run the function
+json4 <- topicmodels_json_ldavis(o_lda4$ldaOut, opps_docs, o_lda4$freq )
+serVis(json4, out.dir = 'o_vis4', open.browser = TRUE)
+
+```
+
+```{r vizo5, eval=F}
+###now provide values and run the function
+json5 <- topicmodels_json_ldavis(o_lda5$ldaOut, opps_docs, o_lda5$freq )
+serVis(json5, out.dir = 'o_vis5', open.browser = TRUE)
+
+```
+
+```{r vizo6, eval=F}
+###now provide values and run the function
+json6 <- topicmodels_json_ldavis(o_lda6$ldaOut, opps_docs, o_lda6$freq )
+serVis(json6, out.dir = 'o_vis6', open.browser = TRUE)
+
+```
+
+```{r threats, eval=F}
+#get some number of topics 
+t_lda4 <- testK(threats_dtm, 4, 10)
+t_lda4$topTerms
+t_lda5 <- testK(threats_dtm, 5, 10)
+t_lda5$topTerms
+t_lda6 <- testK(threats_dtm, 6, 10)
+t_lda6$topTerms
+
+```
+
+```{r vizt4, eval=F}
+###now provide values and run the function
+json4 <- topicmodels_json_ldavis(t_lda4$ldaOut, threats_docs, t_lda4$freq )
+serVis(json4, out.dir = 't_vis4', open.browser = TRUE)
+
+```
+
+```{r vizt5, eval=F}
+###now provide values and run the function
+json5 <- topicmodels_json_ldavis(t_lda5$ldaOut, threats_docs, t_lda5$freq )
+serVis(json5, out.dir = 't_vis5', open.browser = TRUE)
+
+```
+
+```{r vizt6, eval=F}
+###now provide values and run the function
+json6 <- topicmodels_json_ldavis(t_lda6$ldaOut, threats_docs, t_lda6$freq )
+serVis(json6, out.dir = 't_vis6', open.browser = TRUE)
+
+```
+
+##Topic Modeling Results
+The analyst created topic models for each question. The results of the models were not definitive. Each model worked best when it defined 5 or 6 individual topics. The best models are visible below:
+
+* [Strengths](s_vis5/index.html)
+* [Weaknesses](w_vis5/index.html)
+* [Opportunities](o_vis6/index.html)
+* [Threats](t_vis5/index.html)
+
+
+
+##Finding Meaningful Words
+If we treat each SWOT question as a document in its own right, we can uncover the words that are frequent in a single question, but not frequent in the other 3 questions. This is a concept called term frequency-inverse document frequency. It helps us reveal the words that have the most significance for our question. The series of graphics below identifes the top terms within each question, slicing the data by some of our other factors. Any term that appeared only once was removed after computing the tf-idf scores. Terms with a score of zero (indicating that they appeared in all 4 questions) were also removed.
+
+```{r tfidf, fig.height=10}
+
+cleaned <- responses[, c('ID', 'Role', 'YearsExperience', 'Gender', 'Age')]
+
+cleaned <- cleaned %>% left_join(strengths, by='ID') 
+cleaned$strengths <- cleaned$words
+cleaned$words <- NULL
+
+cleaned <- cleaned %>% left_join(weaknesses, by='ID') 
+cleaned$weaknesses <- cleaned$words
+cleaned$words <- NULL
+
+cleaned <- cleaned %>% left_join(opps, by='ID') 
+cleaned$opps <- cleaned$words
+cleaned$words <- NULL
+
+cleaned <- cleaned %>% left_join(threats, by='ID') 
+cleaned$threats <- cleaned$words
+cleaned$words <- NULL
+
+
+
+
+genSWOTVis <- function(df, N=15, nGrams=F, nGramsN=2, swords=NULL, title=''){
+   
+  if(nGrams==T){
+      #df=collapsed;nGramsN=2
+      swot_words <- df  %>%
+      unnest_tokens(word, Words, token = "ngrams", n = nGramsN)  
+      if(nGramsN==2){
+        ##separate out the words  
+        swot_words <- swot_words %>%
+        separate(word, c("word1", "word2"), sep=" ")
+        #filter out any bigram where either word is a stop word
+        swot_words <- swot_words %>%
+        filter(!word1 %in% swords$word) %>%
+        filter(!word2 %in% swords$word) %>%
+        unite(word, word1, word2, sep = " ")
+      }
+      else{
+        ##separate out the words  
+        swot_words <- swot_words %>%
+        separate(word, c("word1", "word2", "word3"), sep=" ")
+        #filter out any bigram where either word is a stop word
+        swot_words <- swot_words %>%
+        filter(!word1 %in% swords$word) %>%
+        filter(!word2 %in% swords$word) %>%
+        filter(!word3 %in% swords$word) %>%
+        unite(word, word1, word2, word3, sep = " ")
+      }
+      
+      
+      swot_words <- swot_words %>%
+      filter(!word %in% swords$word) %>%
+      count(ID, word, sort = TRUE)
+    }
+  else{
+    swot_words <- df  %>%
+    unnest_tokens(word, Words) %>%  
+    count(ID, word, sort = TRUE)
+  }
+   
+
+total_words <- swot_words %>% 
+  group_by(ID) %>% 
+  summarize(total = sum(n))
+
+swot_words <- left_join(swot_words, total_words)
+
+swot_words <- swot_words %>%
+  bind_tf_idf(word, ID, n) %>%
+  filter(n > 1) %>%
+  filter(tf_idf > 0)
+
+#Set up for visualization
+swot_words <- swot_words %>%
+  arrange(desc(tf_idf)) %>%
+  mutate(word = factor(word, levels = rev(unique(word)))) %>% 
+  group_by(ID) %>% 
+  top_n(N) %>% 
+  ungroup() 
+
+#print(swot_words)
+
+  viz <- ggplot(swot_words, aes(word, tf_idf)) +
+  geom_col(show.legend = FALSE) +
+  labs(x = NULL, y = "tf-idf") +
+  facet_wrap(~ID, ncol = 2, scales = "free") +
+  coord_flip() +
+  theme_minimal() +
+  ggtitle(title)
+  return(viz)
+
+
+
+
+}
+
+
+```
+
+###Top Terms Across All Responses
+```{r fig.height=10}
+
+#get all the data
+collapsed <- data.frame('ID' = c('Strengths', 'Weaknesses', 'Opportunities', 'Threats'), 'Words' =  c(
+  paste(strengths$words, collapse=" "), 
+  paste(weaknesses$words, collapse=" "),
+  paste(opps$words, collapse=" "),
+  paste(threats$words, collapse=" ")), 
+  stringsAsFactors = F
+  )
+
+genSWOTVis(collapsed, 10, title="Top Terms Across All Responses")
+
+dev.print(png, file = 'SWOT-allrows.png', width = 800, height = 800)
+
+```
+
+
+###Top Terms Among People Less Than 45 Years Old
+
+```{r fig.height=10}
+youngs <- cleaned[which(cleaned$Age %in% c('25-44', '18-24')), ]
+olds <- cleaned[which(cleaned$Age %in% c('45-64', '65+')), ]
+
+#visualize the young group
+collapsed <- data.frame('ID' = c('Strengths', 'Weaknesses', 'Opportunities', 'Threats'), 'Words' =  c(
+  paste(youngs$strengths, collapse=" "), 
+  paste(youngs$weaknesses, collapse=" "),
+  paste(youngs$opps, collapse=" "),
+  paste(youngs$threats, collapse=" ")), 
+  stringsAsFactors = F
+  )
+genSWOTVis(collapsed, 10, title="Top Terms Among Younger People")
+dev.print(png, file = 'SWOT-young.png', width = 800, height = 800)
+```
+
+
+###Top Terms Among People 45 and Older
+
+```{r fig.height=10}
+#visualize the old group
+collapsed <- data.frame('ID' = c('Strengths', 'Weaknesses', 'Opportunities', 'Threats'), 'Words' =  c(
+  paste(olds$strengths, collapse=" "), 
+  paste(olds$weaknesses, collapse=" "),
+  paste(olds$opps, collapse=" "),
+  paste(olds$threats, collapse=" ")), 
+  stringsAsFactors = F
+  )
+genSWOTVis(collapsed, 10, title="Top Terms Among Older People")
+dev.print(png, file = 'SWOT-old.png', width = 800, height = 800)
+
+
+```
+
+###Top Terms Among Males
+
+```{r fig.height=10}
+male <- cleaned[which(cleaned$Gender == 'Male'), ]
+female <- cleaned[which(cleaned$Gender == 'Female'), ]
+
+#visualize the young group
+collapsed <- data.frame('ID' = c('Strengths', 'Weaknesses', 'Opportunities', 'Threats'), 'Words' =  c(
+  paste(male$strengths, collapse=" "), 
+  paste(male$weaknesses, collapse=" "),
+  paste(male$opps, collapse=" "),
+  paste(male$threats, collapse=" ")), 
+  stringsAsFactors = F
+  )
+genSWOTVis(collapsed, 10, title="Top Terms Among Males")
+dev.print(png, file = 'SWOT-male.png', width = 800, height = 800)
+```
+
+###Top Terms Among Females
+```{r fig.height=10}
+#visualize the old group
+collapsed <- data.frame('ID' = c('Strengths', 'Weaknesses', 'Opportunities', 'Threats'), 'Words' =  c(
+  paste(female$strengths, collapse=" "), 
+  paste(female$weaknesses, collapse=" "),
+  paste(female$opps, collapse=" "),
+  paste(female$threats, collapse=" ")), 
+  stringsAsFactors = F
+  )
+genSWOTVis(collapsed, 10, title="Top Terms Among Females")
+dev.print(png, file = 'SWOT-female.png', width = 800, height = 800)
+
+
+```
+
+
+###Top Terms Among Young Men (Under 45)
+
+```{r fig.height=10}
+male <- cleaned[which(cleaned$Gender == 'Male' &  cleaned$Age %in% c('25-44', '18-24')), ]
+female <- cleaned[which(cleaned$Gender == 'Female' & cleaned$Age %in% c('45-64', '65+')), ]
+
+#visualize the young group
+collapsed <- data.frame('ID' = c('Strengths', 'Weaknesses', 'Opportunities', 'Threats'), 'Words' =  c(
+  paste(male$strengths, collapse=" "), 
+  paste(male$weaknesses, collapse=" "),
+  paste(male$opps, collapse=" "),
+  paste(male$threats, collapse=" ")), 
+  stringsAsFactors = F
+  )
+genSWOTVis(collapsed, 10, title="Top Terms Among Young Men")
+dev.print(png, file = 'SWOT-youngmale.png', width = 800, height = 800)
+
+```
+
+###Top Terms Among Older Women (45 and up)
+
+```{r fig.height=10}
+#visualize the old group
+collapsed <- data.frame('ID' = c('Strengths', 'Weaknesses', 'Opportunities', 'Threats'), 'Words' =  c(
+  paste(female$strengths, collapse=" "), 
+  paste(female$weaknesses, collapse=" "),
+  paste(female$opps, collapse=" "),
+  paste(female$threats, collapse=" ")), 
+  stringsAsFactors = F
+  )
+genSWOTVis(collapsed, 10, title="Top Terms Among Older Women")
+dev.print(png, file = 'SWOT-olderfemale.png', width = 800, height = 800)
+
+
+```
+
+##N-grams
+N-grams are N-word prhases. They are identified by a sliding window. For example, the sentence "The cat sat down" has the following n-word phrases (called bigrams):
+
+* the cat
+* cat sat
+* sat down
+
+It has the following 3-word phrases (trigrams):
+
+* the cat sat
+* cat sat down
+
+N-grams can be used as the tokens in tf-idf weighting. They often provide additional context. 
+
+The analyst generated these N-grams from the raw data, and then removed any N-gram containing a common word (a "stop word"). Any n-gram that appeared only once was removed after computing tf-idf scores, to avoid excessive data in the visualizations. 
+
+
+###Top N-grams Across All Responses
+```{r fig.height=10}
+
+#get all the data
+collapsed <- data.frame('ID' = c('Strengths', 'Weaknesses', 'Opportunities', 'Threats'), 'Words' =  c(
+  paste(responses$Strengths, collapse=" "), 
+  paste(responses$Weaknesses, collapse=" "),
+  paste(responses$Opportunities, collapse=" "),
+  paste(responses$Threats, collapse=" ")), 
+  stringsAsFactors = F
+  )
+
+
+genSWOTVis(collapsed, 10, nGrams=T, nGramsN=2, swords=stopwords, title="Top Bigrams Across All Responses")
+
+dev.print(png, file = 'SWOT-allrows-bigrams.png', width = 800, height = 800)
+
+genSWOTVis(collapsed, 10, nGrams=T, nGramsN=3, swords=stopwords, title="Top Trigrams Across All Responses")
+
+dev.print(png, file = 'SWOT-allrows-trigrams.png', width = 800, height = 800)
+
+```
+
+###Top N-grams Among People Less Than 45 Years Old
+The sample size for people under 45 is small. Several categories of terms had no terms that appeared more than 1 time. Those categories are not included in these visualizations
+
+```{r fig.height=8}
+youngs <- responses[which(responses$Age %in% c('25-44', '18-24')), ]
+olds <- responses[which(responses$Age %in% c('45-64', '65+')), ]
+
+#visualize the young group
+collapsed <- data.frame('ID' = c('Strengths', 'Weaknesses', 'Opportunities'), 'Words' =  c(
+  paste(youngs$Strengths, collapse=" "), 
+  paste(youngs$Weaknesses, collapse=" "),
+  paste(youngs$Opportunities, collapse=" ")), 
+  stringsAsFactors = F
+  )
+genSWOTVis(collapsed, 10, nGrams=T, nGramsN=2, swords=stopwords, title="Top Bigrams Among Younger People")
+
+
+genSWOTVis(collapsed, 10, nGrams=T, nGramsN=3, swords=stopwords, title="Top Trigrams Among Younger People")
+
+
+```
+
+
+###Top N-grams Among People 45 and Older
+
+```{r fig.height=10}
+#visualize the old group
+collapsed <- data.frame('ID' = c('Strengths', 'Weaknesses', 'Opportunities', 'Threats'), 'Words' =  c(
+  paste(olds$Strengths, collapse=" "), 
+  paste(olds$Weaknesses, collapse=" "),
+  paste(olds$Opportunities, collapse=" "),
+  paste(olds$Threats, collapse=" ")), 
+  stringsAsFactors = F
+  )
+genSWOTVis(collapsed, 10, nGrams=T, nGramsN=2, swords=stopwords, title="Top Bigrams for People 45 and Older")
+dev.print(png, file = 'SWOT-old-bigrams.png', width = 800, height = 800)
+
+genSWOTVis(collapsed, 10, nGrams=T, nGramsN=3, swords=stopwords, title="Top Trigrams for People 45 and Older")
+dev.print(png, file = 'SWOT-old-trigrams.png', width = 800, height = 800)
+```
+
+###Top N-grams Among Males
+There is not enough data to produce trigrams for males.
+
+```{r fig.height=10}
+male <- responses[which(responses$Gender == 'Male'), ]
+female <- responses[which(responses$Gender == 'Female'), ]
+
+#visualize the young group
+collapsed <- data.frame('ID' = c('Strengths', 'Weaknesses', 'Opportunities', 'Threats'), 'Words' =  c(
+  paste(male$Strengths, collapse=" "), 
+  paste(male$Weaknesses, collapse=" "),
+  paste(male$Opportunities, collapse=" "),
+  paste(male$Threats, collapse=" ")), 
+  stringsAsFactors = F
+  )
+genSWOTVis(collapsed, 10, nGrams=T, nGramsN=2, swords=stopwords, title="Top Bigrams Among Males")
+dev.print(png, file = 'SWOT-male-bigrams.png', width = 800, height = 800)
+
+
+
+```
+
+###Top N-grams Among Females
+```{r fig.height=10}
+#visualize the old group
+collapsed <- data.frame('ID' = c('Strengths', 'Weaknesses', 'Opportunities', 'Threats'), 'Words' =  c(
+  paste(female$Strengths, collapse=" "), 
+  paste(female$Weaknesses, collapse=" "),
+  paste(female$Opportunities, collapse=" "),
+  paste(female$Threats, collapse=" ")), 
+  stringsAsFactors = F
+  )
+genSWOTVis(collapsed, 10, nGrams=T, nGramsN=2, swords=stopwords, title="Top Bigrams for Females")
+dev.print(png, file = 'SWOT-female-bigrams.png', width = 800, height = 800)
+
+genSWOTVis(collapsed, 10, nGrams=T, nGramsN=3, swords=stopwords, title="Top Trigrams for Females")
+dev.print(png, file = 'SWOT-female-trigrams.png', width = 800, height = 800)
+
+```
+
+
+###Top N-grams Among Young Men (Under 45)
+We have very little data for this category. What's available is shown.
+
+```{r fig.height=6}
+male <- responses[which(responses$Gender == 'Male' &  responses$Age %in% c('25-44', '18-24')), ]
+female <- responses[which(responses$Gender == 'Female' & responses$Age %in% c('45-64', '65+')), ]
+
+#visualize the young group
+collapsed <- data.frame('ID' = c('Strengths', 'Weaknesses', 'Opportunities', 'Threats'), 'Words' =  c(
+  paste(male$Strengths, collapse=" "), 
+  paste(male$Weaknesses, collapse=" "),
+  paste(male$Opportunities, collapse=" "),
+  paste(male$Threats, collapse=" ")), 
+  stringsAsFactors = F
+  )
+genSWOTVis(collapsed, 10, nGrams=T, nGramsN=2, swords=stopwords, title="Top Bigrams for Men Under 45")
+dev.print(png, file = 'SWOT-youngmale-bigrams.png', width = 800, height = 800)
+
+
+
+```
+
+###Top N-grams Among Older Women (45 and up)
+
+```{r fig.height=10}
+#visualize the old group
+collapsed <- data.frame('ID' = c('Strengths', 'Weaknesses', 'Opportunities', 'Threats'), 'Words' =  c(
+  paste(female$Strengths, collapse=" "), 
+  paste(female$Weaknesses, collapse=" "),
+  paste(female$Opportunities, collapse=" "),
+  paste(female$Threats, collapse=" ")), 
+  stringsAsFactors = F
+  )
+genSWOTVis(collapsed, 10, nGrams=T, nGramsN=2, swords=stopwords, title="Top Bigrams for Women 45 and Up")
+dev.print(png, file = 'SWOT-olderfemale-bigrams.png', width = 800, height = 800)
+
+genSWOTVis(collapsed, 10, nGrams=T, nGramsN=3, swords=stopwords, title="Top Trigrams for Women 45 and Up")
+dev.print(png, file = 'SWOT-olderfemale-trigrams.png', width = 800, height = 800)
+
+
+```
