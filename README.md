@@ -7,7 +7,7 @@ This portfolio will contain a variety of data science projects I have completed.
 ### Master Gardener SWOT Survey Text Analysis
 This project was completed to give a high-level understanding of the textual responses in a SWOT survey. This work preceeded in-depth qualitative analysis, and was designed to surface potential avenues of further inquiry.
 
-[View the Project](mastergardenerswot/ReadMe.md)
+[View the Project](mastergardenerSWOT/ReadMe.md)
 
 
  
