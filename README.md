@@ -10,4 +10,10 @@ This project was completed to give a high-level understanding of the textual res
 [View the Project](mastergardenerSWOT/)
 
 
+## Master's Program Class Projects
+
+### Loan Classification using Machine Learning
+This project was completed as the final requirement for DS710 - Statistical Methods. 
+
+[View the Project](LoanAnalysis)
  
