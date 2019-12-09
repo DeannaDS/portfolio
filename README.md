@@ -23,6 +23,11 @@ This project was completed as the final requirement for DS705 - Statistical Meth
 [View the Project](LoanAnalysis)
  
 ### Twitter Hashtag Analysis
-This project was completed as the final requirement for DS710. It includes using the Twitter API and statistical analysis of tweets.
+This project was completed as the final requirement for DS710 - Programming for Data Science. It includes using the Twitter API and statistical analysis of tweets.
 
 [View the Project](TwitterAnalysis)
+
+### Air Quality Analysis - a Big Data Approach
+This project was completed as part of the final requirement for DS730 - Big Data: High-Performance Computing. It uses Spark in Scala and can be run either in a local Hortonworks environment or on Amazon Web Services.
+
+[View the Project](airquality)
