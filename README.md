@@ -22,3 +22,7 @@ This project was completed as the final requirement for DS705 - Statistical Meth
 
 [View the Project](LoanAnalysis)
  
+### Twitter Hashtag Analysis
+This project was completed as the final requirement for DS710. It includes using the Twitter API and statistical analysis of tweets.
+
+[View the Project](TwitterAnalysis)
