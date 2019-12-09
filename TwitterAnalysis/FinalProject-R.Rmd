@@ -3,6 +3,8 @@ title: "Final Project - Analyzing Use of Verbs in Tweets"
 author: "Deanna Schneider"
 date: "October 20, 2017"
 output:
+  word_document: default
+  pdf_document: default
   html_document:
     df_print: paged
 ---
