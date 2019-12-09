@@ -31,3 +31,7 @@ This project was completed as the final requirement for DS710 - Programming for 
 This project was completed as part of the final requirement for DS730 - Big Data: High-Performance Computing. It uses Spark in Scala and can be run either in a local Hortonworks environment or on Amazon Web Services.
 
 [View the Project](airquality)
+
+### Predicting Opioid Use with Machine Learning Models
+
+This project was completed as the final requirement for DS740 - Data Mining and Machine Learning. It uses R to build and assess a machine learning model for predicting opioid use.
