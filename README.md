@@ -37,3 +37,9 @@ This project was completed as part of the final requirement for DS730 - Big Data
 This project was completed as the final requirement for DS740 - Data Mining and Machine Learning. It uses R to build and assess a machine learning model for predicting opioid use.
 
 [View the Project](opioidrisk)
+
+### Analyzing the Collaboration and Communication Networks of Extension Colleagues
+
+This project was completed as part of the course DS745 - Visualization and Unstructured Data Analysis. It uses R to analyze the communication and collaboration network of 80 UW-Madison Division of Extension Employees.
+
+[View the Project](SixDegreesOfExtension)

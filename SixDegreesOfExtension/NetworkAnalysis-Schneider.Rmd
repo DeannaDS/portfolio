@@ -1,0 +1,1245 @@
+---
+title: "Extension Network Analysis"
+author: "Deanna Schneider"
+date: "March 9, 2019"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=F, message=F, echo = F, results = 'hide', fig.width=10, fig.height=10)
+
+pacman::p_unload('statnet')
+pacman::p_load("igraph","sqldf","intergraph","RColorBrewer", "knitr")
+```
+
+## Background and Data Collection
+University of Wisconsin-Madison Division of Extension has approximately 600 employees located throughout the state. Our "out-state" employees (which are those not located on a campus), work in one of 22 geographically-defined administrative areas. Each area varies in size from 1 to 5 counties. To complete this analysis, I surveyed staff from 4 of the areas: 1, 2, 7 and 10. These 4 areas are all located in the northern half of the state but are geographically separated in 2 clusters. Areas 1 and 2 are in the far northwestern corner of the state, while Areas 7 and 10 are in the east-central part of the state.
+
+I surveyed a total of 80 employees, with 51 responding for a 63.8% response rate. I asked each employee to identify the level of communication and collaboration they engage in with the remaining 79 employees. I used the following definitions: 
+
+Communication: any direct written or verbal contact. This could include emails, chat or text messages, phone calls, or in-person conversations. 
+
+Collaboration: actively working together on something, with a common goal. This could include coauthoring documents, teaching together, writing curriculum together, working on evaluations together, co-facilitating a meeting, or planning an event.
+
+For each, I asked them to rate their frequency of engagement, using the following scale:
+
+* Never: You do not communicate directly or collaborate with this person.
+* Sometimes: You communicate or collaborate a few times a year to a couple of times per month.
+* Often: You communicate or collaborate every week or daily.
+
+After the data was collected, I cleaned the data in Excel to have 2 socio-matrices, one for collaboration and one for communication. Additionally, I extracted data from our Human Resources System for each employee surveyed. I included a total of 14 node attributes in the network.
+
+* Department: The top-level programmatic affiliation.
+* Institute: Programmatic affiliation with one of 6 institutes or Administration.
+* Program: Programmatic affiliation, hierarchically below institute
+* PA: Historical programmatic affiliation
+* Employee_Class: The type of employee (Faculty, Academic Staff, or Limited)
+* FTE: percentage appointment (1 = full time appointment)
+* Sex: Identified sex 
+* Jobcode: Official title code
+* Area: Geographic area (1,2,7,10) in which the person works
+* Location: County in which the person works
+* YearsInJob: Number of years in this appointment
+* ZoomMeetings: The number of Zoom online meetings initiated by this employee since Zoom rollout
+* ZoomParticipants: The number of participants in meetings initiated by this employee since Zoom rollout
+* ZoomMinutes: The total number of meeting minutes for meetings initiated by this employee since Zoom rollout
+
+I decided to make the network non-directed, under the assumption that if colleague A collaborates with colleague B, colleague B is also collaborating with colleague A. Assuming that the network is non-directed lets us use all 80 of the nodes and retain an N x N socio-matrix, filling in the blanks by symmetrizing the matrix. If 2 colleagues scored their level of engagement differently, I retained the higher of the 2 scores. In an ideal situation, I would have had the time to clean up those discrepancies. But, for simplicities sake, I chose to make the matrix symmetrical and maximized the level of collaboration and communication.
+
+
+```{r}
+
+#read in the csv of collab edges
+collab <- as.matrix(read.csv('collabGraph_e.csv'))
+#turn collab into a graph object
+collabGraph <- graph_from_edgelist(collab[,2:3], directed=F)
+#remove the isloate loop - this is a hack to keep an isolate in an edge list
+collabGraph <- simplify(collabGraph, remove.loops = TRUE)
+#add the weight
+E(collabGraph)$weight <- as.numeric(collab[1:339,4]) #our isolate is the last row, which we don't have as an edge anymore
+
+#read in the csv of contact edges and turn into a graph (this will only be used in modeling)
+contact <- as.matrix(read.csv('contactGraph_e.csv'))
+#turn contact into a graph object
+contactGraph <- graph_from_edgelist(contact[,2:3], directed=F)
+#add the weight
+E(contactGraph)$weight <- as.numeric(contact[,4])
+
+#read in the node data
+nodeData <- as.data.frame(read.csv('collabGraph_V.csv'))
+
+#get matches by index
+ix <- match(V(collabGraph)$name, nodeData$name)
+
+#set all the node attributes
+V(collabGraph)$Department <- as.character(nodeData$Department[ix])
+V(collabGraph)$Institute <- as.character(nodeData$Institute[ix])
+V(collabGraph)$Program <- as.character(nodeData$Program[ix])
+V(collabGraph)$PA <- as.character(nodeData$PA[ix])
+V(collabGraph)$Employee_Class <- as.character(nodeData$Employee_Class[ix])
+V(collabGraph)$FTE <- nodeData$FTE[ix]
+V(collabGraph)$Sex <- as.character(nodeData$Sex[ix])
+V(collabGraph)$Jobcode <- as.character(nodeData$Jobcode[ix])
+V(collabGraph)$Area <- as.character(nodeData$Area[ix])
+V(collabGraph)$YearsInJob <- nodeData$YearsInJob[ix]
+V(collabGraph)$Location <- as.character(nodeData$Location[ix])
+V(collabGraph)$ZoomMeetings <- nodeData$ZoomMeetings[ix]
+V(collabGraph)$ZoomParticipants <- nodeData$ZoomParticipants[ix]
+V(collabGraph)$ZoomMinutes <- nodeData$ZoomMinutes[ix]
+V(collabGraph)$Number <- as.character(1:80)
+
+#review what we've got
+collabGraph
+
+contactGraph
+
+```
+
+
+
+## Basic Network Statistics
+After loading all the data, we have a non-directed network of 80 nodes and 339 collaboration edges. When working with any network, it always makes sense to start with some basic descriptive statistics: density, number of components, size of largest component, number of isolates, diameter, and the clustering coefficient (also known as transitivity).
+
+
+```{r results="markup"}
+
+#get the density
+basicStats <- data.frame(edge_density(collabGraph),
+#get the number of components
+components(collabGraph)$no,
+#get the size of components
+components(collabGraph)$csize,
+#get the number of isolates
+sum(degree(collabGraph)==0),
+#get the diameter
+diameter(collabGraph, directed=F),
+#get the transitivity
+transitivity(collabGraph, type="undirected"))
+
+colnames(basicStats) <- c('Density', 'Number of Components', 'Size of Largest Component', 'Number of Isolates', 'Diameter', 'Transitivity')
+
+knitr::kable(basicStats[1,], caption="Basic Description of Extension Network")
+```
+
+Density is the proportion of observed ties to possible ties, and it ranges from 0 to 1. Our graph has a density of .107, which suggests that just 10% of the possible ties exist in our network. While this doesn't sound like a very connected network, 2 of our other descriptive statistics give us a different picture.
+
+First, our network is made up of just 2 components. Components are groups of nodes where all members are connected, either directly or indirectly. In our network, one of our components has 79 members, while the other has just 1. That single member is known as an isolate - a node that has no connections. Secondly, our diameter is 6, meaning that from any node, you can reach any other node in 6 or fewer steps. Our network (minus the isolate) is the real-life enactment of the 6 Degrees of Kevin Bacon game.
+
+Finally, our clustering coefficient (also known as transitivity) is the proportion of closed triangles to the total number of open and closed triangles. In other words, this measures how often an employee in our network collaborates with someone who he or she also collaborates with. Our network has a transitivity of .334, suggesting a moderate amount of clustering.
+
+
+## Visualizing the Network
+One of the goals of our reorganization was to foster more collaboration outside of our local offices and programmatic areas. We can use visualization to get a sense of how people collaborate: by our new institutes, by our old program areas, by location, and by area.
+
+
+
+```{r}
+#first switch to statnet, to practice working with it
+pacman::p_unload("igraph")
+pacman::p_load("statnet")
+cnet <- asNetwork(collabGraph)
+contactNet <- asNetwork(contactGraph)
+list.vertex.attributes(cnet)
+
+```
+
+```{r}
+################################################
+# Helper functions
+################################################
+#rescale function for node size
+rescale <- function(nchar,low,high) {
+min_d <- min(nchar)
+max_d <- max(nchar)
+rscl <- ((high-low)*(nchar-min_d))/(max_d-min_d)+low
+rscl
+}
+
+#use a function add transparency
+#https://github.com/mylesmharrison/colorRampPaletteAlpha/blob/master/colorRampPaletteAlpha.R
+addalpha <- function(colors, alpha=1.0) {
+  r <- col2rgb(colors, alpha=T)
+  # Apply alpha
+  r[4,] <- alpha*255
+  r <- r/255.0
+  return(rgb(r[1,], r[2,], r[3,], r[4,]))
+}
+
+#read in saved coordinates (coordinates were saved after repeating the fructermanreingold algorithm until there was a pleasing layout)
+coords <- read.csv('coordinates2.csv')
+coords$X <- coords$coords
+
+#######
+# palette set up
+
+#Get the total colors
+colorCount = length(levels(as.factor(cnet %v% 'Location'))) #location is the largest palette we need
+#use the colorRampPalette so we can have more than 8
+getPalette = colorRampPalette(brewer.pal(8, "Dark2"))
+
+#set up a vector of edge colors
+edgeColors <- rep(addalpha('grey75', .8), length(cnet %e% 'weight'))
+edgeColors[cnet %e% 'weight' == 2] <- addalpha('black', .8)
+
+
+```
+
+```{r}
+#basic plot
+#plot using stored coordinates
+gplot(cnet, # our network object
+     vertex.col=addalpha('grey75', .5), 
+     label.cex = 1,
+     label.pos = 5,
+     usearrows = F,
+     vertex.cex = 2, 
+     main="Extension Network",
+     label = cnet %v% 'Number',
+     edge.col = addalpha('black', .5),
+     coord = coords
+     )
+dev.print(png, file = "basicnetwork.png", width = 1024, height = 1024)
+
+```
+
+
+### Institute Affiliation
+In the following visualizations, node size is proportional to the number of degrees. Black lines represent frequent collaborations and grey lines represent infrequent collaborations.
+
+In the first visualization, node color represents institute affiliation. Leadership hopes there will be collaboration within institute, but across areas.
+
+Visually, it's challenging to pick out what's going on here.
+
+
+```{r}
+#fetch the institutes
+institutes <- as.factor(cnet %v% "Institute")
+
+#set up a palette with the amount of colors needed for institute
+my_pal <- addalpha(brewer.pal(length(levels(institutes)), "Dark2"), .7)
+
+
+#plot using stored coordinates
+gplot(cnet, # our network object
+     vertex.col=my_pal[institutes], # color nodes by institute
+     label.cex = .5,
+     usearrows = F,
+     vertex.cex = rescale(degree(cnet), 1, 3), #size by degree, rescaled
+     main="Network Colored By Institute Affiliation",
+     edge.col = edgeColors,
+     #edge.lty = cnet %e% "weight" * 2,
+     coord = coords
+     )
+
+
+#add a legend
+
+legend("bottomleft",legend=levels(institutes),
+col=my_pal,pch=19,pt.cex=1.5,bty="n",
+cex = .75,
+title="Institute")
+legend("bottomright", legend=c('Sometimes', 'Often'), col=c('grey75', 'black'), lty=1, cex=.75, bty="n", title="Collaboration Frequency")
+#write these coordinates to CSV for later use (done when I had a layout I liked)
+#write.csv(coords, 'coordinates.csv')
+```
+To make it easier to see what's happening, we can separate out the 2 levels of connection (sometimes and often). The following 2 graphs show each set of edges separately, but maintain the node positions in the same place. Nodes are not sized by degree in these 2 visualizations.
+
+```{r}
+op <- par(mfrow=c(1,2),mar=c(2,2,2,2))
+#set up a vector of edge colors
+edgeColors <- rep(addalpha('white', .1), length(cnet %e% 'weight'))
+edgeColors[cnet %e% 'weight' == 2] <- addalpha('black', .8)
+#plot the strong and weak ties separately
+
+gplot(cnet, # our network object
+     vertex.col=my_pal[institutes], # color nodes by institute
+     label.cex = .5,
+     usearrows = F,
+     #vertex.cex = rescale(degree(cnet), 1, 3), #size by degree, rescaled
+     edge.lwd=cnet %e% "weight",
+     edge.col = edgeColors,
+     coord = coords
+    
+     )
+title("Strong Ties", line = -12)
+
+edgeColors <- rep(addalpha('white', .1), length(cnet %e% 'weight'))
+edgeColors[cnet %e% 'weight' == 1] <- addalpha('grey75', .8)
+#plot the strong and weak ties separately
+
+gplot(cnet, # our network object
+     vertex.col=my_pal[institutes], # color nodes by institute
+     label.cex = .5,
+     usearrows = F,
+     #vertex.cex = rescale(degree(cnet), 1, 3), #size by degree, rescaled
+     edge.lwd=cnet %e% "weight",
+     edge.col = edgeColors,
+     coord = coords
+     )
+title("Weak Ties", line = -12)
+
+legend("bottomright",legend=levels(institutes),
+col=my_pal,pch=19,pt.cex=1.5,bty="n",
+cex = .75,
+title="Institute")
+legend("bottomleft", legend=c('Sometimes', 'Often'), col=c('grey75', 'black'), lty=1, cex=.75, bty="n", title="Collaboration Frequency")
+legend("bottomleft", legend=c('Sometimes', 'Often'), col=c('grey75', 'black'), lty=1, cex=.75, bty="n", title="Collaboration Frequency")
+
+par(op)
+```
+
+When you isolate the frequent collaborators, you can begin to see some tendency for matching institutes to collaborate. For instance, you can see the 3 orange (AG) nodes on the right side of the graph, and a cluster of 11 brown (YOUTH) nodes that are all interconnected. You can also see a handful of scattered green (HEALTH) nodes that are connected with each other, as well.
+
+You can also see intra-institute matches among the weak collaboration ties, particularly among the youth and agriculture institutes. Here, we also pick up at least one triangle among colleagues in the Community Development institute.
+
+### Program Area
+Most people have worked in our organization long enough to still feel allegiance to the program areas that preceded institutes. We can visualize the network with nodes colored by program area as well. We'll dive right into the split networks.
+
+```{r}
+op <- par(mfrow=c(1,2),mar=c(2,2,2,2))
+#fetch the program areas
+pa <- as.factor(cnet %v% "PA")
+
+edgeColors <- rep(addalpha('white', .1), length(cnet %e% 'weight'))
+edgeColors[cnet %e% 'weight' == 2] <- addalpha('black', .8)
+
+
+#set up a palette with the amount of colors needed for pa
+my_pal <- addalpha(brewer.pal(length(levels(pa)), "Dark2"), .7)
+
+#fetch the coordinates so we can stretch them out a bit
+gplot(cnet, # our network object
+     vertex.col=my_pal[pa], # color nodes by institute
+     label.cex = .5,
+     usearrows = F,
+     #vertex.cex = rescale(degree(cnet), 1, 3), #size by degree, rescaled
+     #edge.lwd=cnet %e% "weight",
+     edge.col = edgeColors,
+     coord = coords
+     )
+title("Strong Ties", line = -12)
+
+#add a legend
+
+#fetch the program areas
+pa <- as.factor(cnet %v% "PA")
+
+edgeColors <- rep(addalpha('white', .1), length(cnet %e% 'weight'))
+edgeColors[cnet %e% 'weight' == 1] <- addalpha('grey75', .8)
+
+
+#set up a palette with the amount of colors needed for pa
+my_pal <- addalpha(brewer.pal(length(levels(pa)), "Dark2"), .7)
+
+#fetch the coordinates so we can stretch them out a bit
+gplot(cnet, # our network object
+     vertex.col=my_pal[pa], # color nodes by institute
+     label.cex = .5,
+     usearrows = F,
+     #vertex.cex = rescale(degree(cnet), 1, 3), #size by degree, rescaled
+     #edge.lwd=cnet %e% "weight",
+     edge.col = edgeColors,
+     coord = coords
+     )
+title("Weak Ties", line = -12)
+
+#add a legend
+
+legend("bottomright",legend=levels(pa),
+col=my_pal,pch=19,pt.cex=1.5,bty="n",
+cex = .75,
+title="Program Area")
+legend("bottomleft", legend=c('Sometimes', 'Often'), col=c('grey75', 'black'), lty=1, cex=.75, bty="n", title="Collaboration Frequency")
+
+par(op)
+
+
+
+
+```
+We continue to see a fair number of connections among people in the Ag program area. (This program area is quite similar to the current agriculture institute.) We see a few more connections in the FLP program area, which in the new model is split into multiple institutes.
+
+Again here we see some tendency for intra-program area attachment.
+
+### Location
+Each person in the dataset works in a local county office. It's reasonable to assume that we might see strong clusters at the local county office level. Looking at the visualization, it appears that there is some amount of in-county collaboration happening, but it does not appear that county borders are limiting collaboration either.
+
+```{r}
+#fetch the locations
+county <- as.factor(cnet %v% "Location")
+#set up a palette with the amount of colors needed for institute
+my_pal <- addalpha(getPalette(length(levels(county))), .7)
+op <- par(mfrow=c(1,2),mar=c(2,2,2,2))
+
+edgeColors <- rep(addalpha('white', .1), length(cnet %e% 'weight'))
+edgeColors[cnet %e% 'weight' == 2] <- addalpha('black', .8)
+
+
+gplot(cnet, # our network object
+     vertex.col=my_pal[county], # color nodes by institute
+     label.cex = .5,
+     usearrows = F,
+     vertex.cex = rescale(degree(cnet), 1, 3), #size by degree, rescaled
+     edge.lwd=cnet %e% "weight",
+     edge.col = edgeColors,
+     coord = coords
+     )
+title("Strong Ties", line=-12)
+
+edgeColors <- rep(addalpha('white', .1), length(cnet %e% 'weight'))
+edgeColors[cnet %e% 'weight' == 1] <- addalpha('grey75', .8)
+
+gplot(cnet, # our network object
+     vertex.col=my_pal[county], # color nodes by institute
+     label.cex = .5,
+     usearrows = F,
+     vertex.cex = rescale(degree(cnet), 1, 3), #size by degree, rescaled
+     edge.lwd=cnet %e% "weight",
+     edge.col = edgeColors,
+     coord = coords
+     )
+title("Weak Ties", line=-12)
+
+
+#add a legend
+
+legend("bottomright",legend=levels(county),
+col=my_pal,pch=19,pt.cex=1.5,bty="n", cex = .75,
+title="County")
+legend("bottomleft", legend=c('Sometimes', 'Often'), col=c('grey75', 'black'), lty=1, cex=.75, bty="n", title="Collaboration Frequency")
+
+par(op)
+
+```
+
+### Area Affiliation
+Finally, we have 4 geographical areas. We can visualize the network with nodes colored by these four areas. Area appears to have the most visual cohesion. Additionally, there seems to be fairly strong cohesion within the 2 geographical clusters (areas 1 and 2 vs. areas 7 and 10), though there are multiple connections that bridge that gap.
+
+```{r fig.width=8}
+
+
+
+op <- par(mfrow=c(1,2),mar=c(2,2,2,2))
+
+edgeColors <- rep(addalpha('white', .1), length(cnet %e% 'weight'))
+edgeColors[cnet %e% 'weight' == 2] <- addalpha('black', .8)
+
+
+areas <- factor(cnet %v% 'Area', levels=c('1','2','7','10'))
+my_pal <- addalpha(brewer.pal(4,"Dark2"), .7)
+
+#fetch the coordinates so we can have consistent graphs (ran this a few times, until I found a layout I liked)
+#coords <- 
+ gplot(cnet, # our network object
+        vertex.col=my_pal[areas], # color nodes by area
+        label.cex = .5,
+        usearrows = F,
+        vertex.cex = rescale(degree(cnet), 1, 3), #size by degree, rescaled
+        edge.lwd=cnet %e% "weight",
+        edge.col = edgeColors,
+        coord = coords
+          )
+title("Strong Ties", line=-12)
+edgeColors <- rep(addalpha('white', .1), length(cnet %e% 'weight'))
+edgeColors[cnet %e% 'weight' == 1] <- addalpha('grey75', .8)
+ gplot(cnet, # our network object
+        vertex.col=my_pal[areas], # color nodes by area
+        label.cex = .5,
+        usearrows = F,
+        vertex.cex = rescale(degree(cnet), 1, 3), #size by degree, rescaled
+        edge.lwd=cnet %e% "weight",
+
+        edge.col = edgeColors,
+        coord = coords
+          )
+title("Weak Ties", line=-12)
+
+#add a legend
+
+legend("bottomright",legend=levels(areas),
+col=my_pal,pch=19,pt.cex=1.5,bty="n",cex = .75,
+title="Area")
+legend("bottomleft", legend=c('Sometimes', 'Often'), col=c('grey75', 'black'), lty=1, cex=.75, bty="n", title="Collaboration Frequency")
+
+#write these coordinates to CSV for later use (done when I had a layout I liked)
+#write.csv(coords, 'coordinates.csv')
+par(op)
+```
+
+## Actor Prominence
+Another way to visualize the network is to look at who our prominent or important actors are. There are multiple ways to determine importance. We'll look at two: Degree centrality and Betweenness Centrality.
+
+
+*Degree Centrality* identifies the actors with the most connections to other people. Having multiple connections means that these people have multiple ways to receive information and accomplish collaborations. We have nodes with degrees ranging from 0 to 24. I rescaled all degrees to be between 1 and 6, and chose prominent actors as those with a rescaled degree above 5.
+
+With *betweenness centrality*, we are most interested in the people that sit "between" parts of our network. These are the people that are key for information flow. Without these people, we would have a harder time disseminating information. For betweenness, we have node scores between 0 and 636. Again, I rescaled the betweenness scores between 1 and 6, and identified prominent actors as those with a rescaled betweenness score above 5.
+
+You can see that slightly different people are identified as important using each method.
+
+
+
+```{r results="markup"}
+#########################
+# Output for final report, combining 2 with table
+#########################
+#get blank names for everyone but the prominent nodes
+nDeg <- rescale(degree(cnet), 1, 6)
+centralNames <- cnet %v% 'Number'
+centralNames[which(nDeg <= 5)] <-  NA
+#get transparent light colors for everyone but the prominent nodes
+colorT  <- addalpha('#1B9E77', .1)
+colorH <- addalpha('red3', .3)
+allColors <- rep(colorT, length(nDeg) )
+allColors[which(nDeg > 5)] <- colorH
+
+op <- par(mfrow=c(1,2), mar=c(1,1,1,1))
+gplot(cnet, # our network object
+     vertex.col=allColors, # color nodes by institute
+     label.cex = 1.25,
+     label.col = "black",
+     label = centralNames,
+     label.pos = 5,
+     usearrows = F,
+     edge.col = edgeColors,
+     vertex.cex = nDeg, #size by degree, rescaled
+     #edge.lwd=cnet %e% "weight",
+
+     coord = coords
+     )
+title("Prominence By Degree", line=-12)
+#get blank names for everyone but the prominent node
+nBet <- rescale(betweenness(cnet), 1, 6)
+centralNames <- cnet %v% 'Number'
+centralNames[which(nBet <= 5)] <-  NA
+#get transparent light colors for everyone but the prominent nodes
+colorT  <- addalpha('#1B9E77', .1)
+colorH <- addalpha('red3', .3)
+allColors <- rep(colorT, length(nBet) )
+allColors[which(nBet > 5)] <- colorH
+
+
+gplot(cnet, # our network object
+     vertex.col=allColors, # color nodes by institute
+     label.cex = 1.25,
+     label = centralNames,
+     label.col = "black",
+     label.pos = 5,
+     usearrows = F,
+     vertex.cex = nBet, #size by betweenness, rescaled
+     #edge.lwd=cnet %e% "weight",
+     edge.col = edgeColors,
+     coord = coords
+     )
+title("Prominence By Betweenness", line=-12)
+
+par(op)
+
+df <- as.data.frame(cbind(cnet %v% 'Number', cnet %v% 'Area', cnet %v% 'Location', cnet %v% 'Department', cnet %v% 'Institute', cnet %v% 'Sex', cnet %v% 'YearsInJob'))
+
+colnames(df) <- c('Number', 'Area', 'Location', 'Department', 'Institute', 'Sex', 'Years in Job')
+rownames(df) <- c()
+
+kable(df[which(nBet > 5 |nDeg > 5 ), 2:7], caption="Characteristics of Important Actors")
+
+```
+
+
+
+
+### Eigenvector Centrality
+Eigenvector centrality is similar to how Google ranks pages. Nodes that are connected to their important nodes have the highest eigenvector centrality scores. Here we see that when considering eigenvector centrality, we have fewer important nodes.
+
+```{r}
+#get all the eigenvector Centrality scores
+nEig <- evcent(cnet)
+
+#look at a max eigenvector score
+max(nEig)
+nEig[which(nEig > .25)] #it looks like we have 2 greater than .25
+
+#get transparent light colors for everyone but the prominent nodes
+colorT  <- addalpha('#1B9E77', .1)
+colorH <- addalpha('red3', .5)
+allColors <- rep(colorT, length(nEig) )
+allColors[which(nEig > .25)] <- colorH
+
+
+#get blank names for everyone but the prominent node
+centralNames <- paste(cnet %v% 'Employee_Class', '-', cnet %v% 'Institute', '-', cnet %v% 'Area')
+centralNames[which(nEig <= .25)] <-  NA
+
+gplot(cnet, # our network object
+     vertex.col=allColors, # color nodes by institute
+     label.cex = .75,
+     label = centralNames,
+     label.pos = 2,
+     usearrows = F,
+     vertex.cex = rescale(nEig, 1, 5), #size by eigenvector, rescaled
+     #edge.lwd=cnet %e% "weight",
+     main="Prominent Nodes by Eigenvector Centrality",
+     edge.col = edgeColors,
+     coord = coords
+     )
+
+```
+
+
+
+
+### CutPoints
+Finally, we can look at cutpoints. A cutpoint is a node that would increase the number of components in the network if it were dropped. Therefore, cut points can be important nodes in the network, because if they were dropped, there would be a disconnect between two parts of the network. If we look at the cutpoints in our network, we can see that different important nodes are highlighted, compared to our other measures of centrality or importance.
+
+
+```{r}
+cpnet <- cutpoints(cnet, mode="graph", return.indicator=T)
+gplot(cnet,
+      gmode="graph",
+      vertex.col=addalpha(cpnet+2, .8),
+      coord=coords,
+      jitter=FALSE,
+      edge.col = edgeColors,
+      vertex.cex = rescale(degree(cnet), 1, 5), #size by degree, rescaled
+      displaylabels=F)
+```
+
+What can we learn from these measures of importance? In this instance, we could speak to the people that are identified as important nodes and find out from them how they see themselves in this collaborative network. These are people that we can target to improve collaborations in other parts of the network that are currently less connected, perhaps.
+
+
+
+## Identifying Subgroups
+While we could continue looking at various plots to try to visually assess network patterns, our time is better spent using the tools in the igraph package to look for specific types of subgroups.
+
+```{r}
+#switch back to igraph
+pacman::p_unload('statnet')
+pacman::p_load('igraph')
+
+```
+### Clique Identification
+Typically, cliques are fairly rare. A clique requires all possible connections in a set of nodes to be there. If even one connection is missing, the clique doesn't exist. For example, for a group of 7 nodes, all 21 possible ties must exist between all seven nodes.
+
+Our network has not 1 but 2 7-node cliques. If we compare our network to 1000 randomly generated models using the same number of nodes and edges, 1000 small world model using the approximate degree distribution of our observed network, and 1000 models using the approximate power law of our observed network, you can see that our observed network has far more cliques and larger cliques than expected in either a random network, small world network, or power law network. The red horizontal line in each of these graphs indicate our observed network's largest clique and total cliques.
+
+```{r}
+#get the size of the largest clique & how many cliques do we have that are at least 3 members
+cg <- c(clique.number(collabGraph), length(cliques(collabGraph, min=3)))
+cg
+seeds <- 1:1000
+
+get_cliques <- function(x, type='random'){
+  set.seed(x)
+  if(type == 'random'){
+    g <- erdos.renyi.game(80, 339, type="gnm")
+  }
+  else if(type=='smallworld'){
+    g <- watts.strogatz.game(dim=1, size=80, nei=4, p=edge_density(collabGraph))
+  }
+  else if(type=='power'){
+    #first see what power we should use
+    fit1 <- fit_power_law(x=degree(collabGraph))
+    g <- sample_fitness_pl(80, 339, exponent.out = fit1$alpha, exponent.in = -1,
+                  loops = FALSE, multiple = FALSE, finite.size.correction = TRUE)
+  }
+  c(clique.number(g), length(cliques(g, min=3)))
+  
+}
+
+rand_cliques <- sapply(seeds,get_cliques, type='random')
+sw_cliques <- sapply(seeds, get_cliques, type='smallworld')
+power_cliques <- sapply(seeds, get_cliques, type='power')
+
+op <- par(mfrow=c(1,2))
+#combine the clique sizes
+clique_size <- cbind(rand_cliques[1,], sw_cliques[1,], power_cliques[1,])
+colnames(clique_size) <- c('Random', 'Small World', 'Power')
+boxplot(clique_size, main="Maximum Clique Size", ylim=c(1, 8))
+abline(h = clique.number(collabGraph), col="red")
+
+#total cliques
+clique_number <- cbind(rand_cliques[2,], sw_cliques[2,], power_cliques[2,])
+colnames(clique_number) <- c('Random', 'Small World', 'Power')
+boxplot(clique_number, main="Total Cliques", ylim=c(1,750))
+abline(h=length(cliques(collabGraph, min=3)), col="red")
+par(op)
+
+```
+
+
+
+
+### k-Cores
+Instead of relying on cliques, network analysts can use k-Cores to identify sub-groups. A k-Core is a group of nodes in a network where each node is connected to at least k other nodes. 39 of our network members form the largest k-core in our network, with each node connected to 6 other nodes. The 6-core cluster seems to be in 2 chunks at the middle of our network.
+
+```{r}
+#get the coreness
+coreness <- graph.coreness(collabGraph)
+table(coreness)
+```
+
+```{r}
+my_pal <- addalpha(brewer.pal(7,"Dark2"), .7)
+plot(collabGraph, 
+     vertex.label.cex=.8,
+     vertex.label = coreness,
+     vertex.color=my_pal[coreness + 1],
+     layout=as.matrix(coords),
+     main='All k-Cores')
+```
+
+### Modularity
+Modularity is a measure of the network structure in which there is greater density within a cluster than outside of it. We can look at the various node attributes within our network to see which ones show the highest modularity score. As seen earlier in our visualizations, Area shows the highest modularity. Institute and location are the next 2 highest modularity scores, but they are quite a bit less modular than Area. 
+
+```{r results="markup"}
+
+#modularity expects numbers starting at 1. Let's look at the modularity by node attributes
+area_num <- as.numeric(factor(V(collabGraph)$Area))
+loc_num <- as.numeric(factor(V(collabGraph)$Location))
+inst_num <- as.numeric(factor(V(collabGraph)$Institute))
+pa_num <- as.numeric(factor(V(collabGraph)$PA))
+program_num <- as.numeric(factor(V(collabGraph)$Program))
+jobcode_num <- as.numeric(factor(V(collabGraph)$Jobcode))
+dept_num <- as.numeric(factor(V(collabGraph)$Department))
+sex_num <- as.numeric(factor(V(collabGraph)$Sex))
+
+mods <- rbind(modularity(collabGraph, area_num),
+modularity(collabGraph, loc_num),
+modularity(collabGraph, inst_num),
+modularity(collabGraph, pa_num),
+modularity(collabGraph, program_num),
+modularity(collabGraph, jobcode_num),
+modularity(collabGraph, dept_num),
+modularity(collabGraph, sex_num))
+
+row.names(mods) <- c('Area', 'Location', 'Institute', 'Program Area', 'Program', 'Jobcode', 'Department', 'Sex')
+colnames(mods) <- 'Modularity'
+
+kable(mods[order(-mods[, 1]),], caption = 'Modularity scores for node attributes of the Extension Network.')
+
+
+```
+
+### Automated Community Detection
+There are several ways we can do automated community detection using igraph. A weighted, non-directed graph can be tested with Edge-betweenness, Fast-greedy, Louvain, and Infomap algorithms.
+```{r results="markup"}
+#I have a weighted, non-directed graph with multiple components
+c_eb <- cluster_edge_betweenness(collabGraph)
+c_fg <- cluster_fast_greedy(collabGraph)
+c_louv <- cluster_louvain(collabGraph)
+c_infomap <- cluster_infomap(collabGraph)
+
+#this one won't run and just crashes R eventually - it's an npcomplete problem and isn't recommended for more than 50 vertices
+#c_optimal <- cluster_optimal(collabGraph)
+
+#collect some stats about our top manual approach (Area) and these auto approaches
+methods <- c('Area', 'Edge Betweenness', 'Fast Greedy', 'Louvain', 'Infomap')
+method_modularity <- c(modularity(collabGraph, area_num),modularity(c_eb),modularity(c_fg),modularity(c_louv),modularity(c_infomap) )
+method_max <- c(max(as.numeric(factor(V(collabGraph)$Area))), 
+                max(membership(c_eb)),
+                max(membership(c_fg)),
+                max(membership(c_louv)),
+                max(membership(c_infomap))
+                )
+#put it all in a dataframe and review
+comDetResults <- as.data.frame(rbind(method_modularity,method_max))
+colnames(comDetResults) <- methods
+rownames(comDetResults) <- c('Modularity', 'Total Communities')
+
+kable(round(comDetResults, 3), caption="Community Detection Results for the Extension Network")
+```
+```{r}
+######
+# Look at how each of these compare to area
+table(V(collabGraph)$Area, membership(c_eb))
+table(V(collabGraph)$Area, membership(c_fg))
+table(V(collabGraph)$Area, membership(c_louv))
+table(V(collabGraph)$Area, membership(c_infomap))
+
+#we can see how similar these clusterings are numerically as well. (0 = totally different, 1 = completely the same)
+comm_results <- rbind(compare(as.numeric(factor(V(collabGraph)$Area)), c_eb, method="adjusted.rand"),
+compare(as.numeric(factor(V(collabGraph)$Area)), c_fg, method="adjusted.rand"),
+compare(as.numeric(factor(V(collabGraph)$Area)), c_louv, method="adjusted.rand"),
+compare(as.numeric(factor(V(collabGraph)$Area)), c_infomap, method="adjusted.rand"),
+compare(c_eb, c_fg, method="adjusted.rand"),
+compare(c_eb, c_louv, method="adjusted.rand"),
+compare(c_eb, c_infomap, method="adjusted.rand"),
+compare(c_fg, c_louv, method="adjusted.rand"),
+compare(c_fg, c_infomap, method="adjusted.rand"),
+compare(c_louv, c_infomap, method="adjusted.rand"))
+
+row.names(comm_results) <- c('Area vs. Edge Betweeness', 'Area vs. Fast Greedy', 
+                             'Area vs. Louvain', 'Area vs. Infomap', 
+                             'Edge Betweenness vs. Fast Greedy',
+                             'Edge Betweenness vs. Louvain',
+                             'Edge Betweenness vs. Infomap',
+                             'Fast Greedy vs. Louvain',
+                             'Fast Greedy vs. Infomap',
+                             'Louvain vs. Infomap'
+                             )
+
+kable(comm_results[order(-comm_results[, 1]),], caption = 'Comparison of Communities')
+
+```
+
+Each of these ways uses a slightly different algorithm but results in a similar number of clusters - between 4 and 6 except for the Edge Betweenness algorithm which defines 12 communities. The modularity scores are fairly similar (between .401 and .439). The Louvain method achieves the highest level of modularity of the automated algorithms, but simply using Area to define our communities has a higher modularity score.
+
+The 4 visualizations below compare each community (excluding the least modular Edge-betweeness Community) in decreasing order of modularity. You can see that they are quite similar. Given that the Area communities have the highest modularity score, these are the most logical choice were we interested in doing sub-community analysis. These communities are understandable and recognizable for the people in Extension, and it is not surprising that they are cohesive sub-communities given the emphasis placed on intra-Area collaboration.
+
+
+```{r}
+op <- par(mfrow=c(2,2))
+#set up a vector of edge colors
+edgeColors <- rep(addalpha('grey75', .8), length(E(collabGraph)$weight))
+edgeColors[E(collabGraph)$weight == 2] <- addalpha('black', .8)
+
+my_pal <- addalpha(brewer.pal(6,"Dark2"), .7)
+com_pal <- addalpha(brewer.pal(6, "Dark2"), .2)
+
+areas <- factor(V(collabGraph)$Area, levels=c('1','2','7','10'))
+marks <- list('1' = V(collabGraph)$name[V(collabGraph)$Area==1], '2'= V(collabGraph)$name[V(collabGraph)$Area==2], '7' = V(collabGraph)$name[V(collabGraph)$Area==7], '10' = V(collabGraph)$name[V(collabGraph)$Area==10])
+
+#plot by the Area communities
+plot(collabGraph, 
+             label.cex = .25,
+             usearrows = F,
+             vertex.size = rescale(degree(collabGraph), 5, 20), #size by degree, rescaled
+             edge.lwd=1.5*E(collabGraph)$weight,
+             main=paste("Area Communities - ", round(modularity(collabGraph, area_num), 3)),
+             vertex.label = NA, #V(collabGraph)$Area,
+             edge.color = edgeColors,
+             mark.groups=marks,
+             mark.border = my_pal,
+             mark.col=com_pal,
+             vertex.color=my_pal[areas],
+             layout = as.matrix(coords))
+
+
+#plot by the louvain clustering 
+plot(c_louv, collabGraph, 
+             label.cex = .25,
+             usearrows = F,
+             col=my_pal[membership(c_louv)],
+             mark.border=my_pal,
+             mark.col=com_pal,
+             edge.color = edgeColors,
+             vertex.size = rescale(degree(collabGraph), 5, 20), #size by degree, rescaled
+             edge.lwd=1.5*E(collabGraph)$weight,
+             main=paste("Louvain Communities - ", round(modularity(c_louv), 3)),
+             vertex.label = NA, #V(collabGraph)$Area,
+             layout = as.matrix(coords))
+
+
+
+#plot by the infomap clustering 
+plot(c_infomap, collabGraph, 
+             label.cex = .25,
+             usearrows = F,
+             col=my_pal[membership(c_infomap)],
+             mark.border=my_pal,
+             mark.col=com_pal,
+             edge.color = edgeColors,
+             vertex.size = rescale(degree(collabGraph), 5, 20), #size by degree, rescaled
+             edge.lwd=1.5*E(collabGraph)$weight,
+             main=paste("Infomap Communities - ", round(modularity(c_infomap), 3)),
+             vertex.label = NA, #V(collabGraph)$Area,
+             layout = as.matrix(coords))
+
+
+
+#plot by the fast greedy clustering 
+plot(c_fg, collabGraph, 
+             label.cex = .25,
+             usearrows = F,
+             col=my_pal[membership(c_fg)],
+             mark.border=my_pal,
+             mark.col=com_pal,
+             edge.color = edgeColors,
+             vertex.size = rescale(degree(collabGraph), 5, 20), #size by degree, rescaled
+             edge.lwd=1.5*E(collabGraph)$weight,
+             main=paste("Fast Greedy Communities - ", round(modularity(c_fg), 3)),
+             vertex.label = NA, #V(collabGraph)$Area,
+             layout = as.matrix(coords))
+
+
+
+par(op)
+
+
+```
+
+
+##Modeling
+
+### Statistical Network Models
+
+ERGM (exponential random graph models) can be used to build and test hypotheses about networks. ERGMs can help us test hypotheses about both nodes and the overall network, such as diameter or degree distribution.
+
+We will use ERGM to focus on predicting the likelihood of 2 colleagues forming a collaborative relationship based on various data we have about them.
+
+We can start by producing scatterplots to determine if there are any obvious connections between our numerical parameters and total number of degrees.
+
+```{r}
+#switch back to statnet and load ergm
+pacman::p_unload('igraph')
+pacman::p_load('statnet', 'ergm')
+```
+
+```{r}
+#start with a null model
+mod0 <- ergm(cnet ~ edges, 
+             control=control.ergm(seed=40)) #this just gives consistent results
+
+summary(mod0)
+#confirm that the edge node matches our graph density
+plogis(coef(mod0))
+```
+
+```{r}
+
+op <- par(mfrow=c(2,2))
+#check out some potential main effects of nodes
+scatter.smooth(cnet %v% 'YearsInJob',
+degree(cnet,gmode='graph'),
+xlab='Years Job',
+ylab='Degree')
+
+scatter.smooth(cnet %v% 'ZoomMeetings',
+degree(cnet,gmode='graph'),
+xlab='Zoom Meetings',
+ylab='Degree')
+
+scatter.smooth(cnet %v% 'ZoomMinutes',
+degree(cnet,gmode='graph'),
+xlab='Zoom Minutes',
+ylab='Degree')
+
+scatter.smooth(cnet %v% 'ZoomParticipants',
+degree(cnet,gmode='graph'),
+xlab='Zoom Participants',
+ylab='Degree')
+
+par(op)
+```
+
+None of these numerical nodes look to be obviously related to number of degrees. But, we can test it by creating a model using the nodecov approach.
+
+```{r}
+mod1 <- ergm(cnet ~ edges +
+             nodecov('YearsInJob') +
+             nodecov('ZoomMeetings') +
+             nodecov('ZoomMinutes') +
+             nodecov('ZoomParticipants') +
+             nodecov('FTE'),
+             control=control.ergm(seed=40))
+summary(mod1)
+```
+
+Years in job is positively and significantly associated with the likelihood of observing a tie between 2 colleagues. 
+
+Zoom is the online collaboration tool that we use. We initiated the use of it 7 months ago. Not everyone has a trackable account, and we only track statistics related to the person that initiates a meeting. 
+
+Zoom Meetings is not significant. We can remove that from the model and add some additional factors. Faculty generally have collaboration as part of their job description. It's reasonable to assume that faculty would collaborate more than academic staff. 
+
+We can also see if sex makes a difference in likelihood to collaborate.
+
+```{r}
+mod2 <- ergm(cnet ~ edges +
+             nodecov('YearsInJob')  +
+             nodecov('ZoomMinutes') +
+             nodecov('ZoomParticipants') +
+               nodefactor('Employee_Class') +
+               nodefactor('Sex'),
+             control=control.ergm(seed=40))
+summary(mod2)
+```
+
+Adding in the Employee Class variable makes the Years in Job variable no longer significant. We can remove that variable from our model. 
+
+We've seen from earlier modularity tests that people tend to collaborate within area. Let's try matching for area.
+
+```{r}
+mod3 <- ergm(cnet ~ edges +
+             nodecov('ZoomMinutes') +
+             nodecov('ZoomParticipants') +
+               nodefactor('Employee_Class')+
+               nodefactor('Sex') +
+               nodematch('Area'),
+             control=control.ergm(seed=40))
+summary(mod3)
+```
+
+Matching by Area is positively and significantly associated with the likelihood that 2 employees would collaborate. Let's see if certain areas are more likely than others.
+
+```{r}
+mod4 <- ergm(cnet ~ edges +
+             nodecov('ZoomMinutes') +
+             nodecov('ZoomParticipants') +
+               nodefactor('Employee_Class')+
+               nodefactor('Sex') +
+               nodematch('Area', diff=T) +
+               nodematch('Employee_Class'),
+             control=control.ergm(seed=40))
+summary(mod4)
+```
+
+This model shows that all four areas are positively and significantly associated with the likelihood that 2 colleagues  _from the same area_ will collaborate with each other.
+
+Does the homophily effect go down to the level of location?
+
+```{r}
+mod5 <- ergm(cnet ~ edges +
+             nodecov('ZoomMinutes') +
+             nodecov('ZoomParticipants') +
+               nodefactor('Employee_Class')+
+               nodematch('Employee_Class') +
+               nodefactor('Sex') +
+               nodematch('Area', diff=T) + #match by area, each separately
+               nodematch('Location'), #match by location, in general
+             control=control.ergm(seed=40))
+summary(mod5)
+```
+
+Matching by location is also positively and significantly associated with the liklihood that 2 employees will collaborate. 
+
+Let's look at Programmatic affiliation. We have 4 ways to look at that: Department, Institute, Program, and the old Program Area. It's reasonable to assume that we would find homophily effects here, based on what have seen earlier in our visualizations.
+
+```{r}
+mod6 <- ergm(cnet ~ edges +
+             nodecov('ZoomMinutes') +
+             nodecov('ZoomParticipants') +
+               nodefactor('Employee_Class')+
+               nodematch('Employee_Class')+
+               nodefactor('Sex') +
+               nodematch('Area', diff=T) + #match by area, each separately
+               nodematch('Location') + #match by location, in general
+               nodematch('Department') +
+               nodematch('Institute'), 
+             control=control.ergm(seed=40))
+summary(mod6)
+```
+Department and Institute both are positively and significantly associated with the likelihood that 2 colleagues will collaborate. 
+
+We also have one edge variable - the amount of communication that happens between 2 nodes. We can use that as a predictor. It's logical to assume higher levels of communication result in more collaboration.
+
+
+```{r}
+
+mod7 <- ergm(cnet ~ edges +
+             nodecov('ZoomMinutes') +
+             nodecov('ZoomParticipants') +
+               nodefactor('Employee_Class') +
+               nodematch('Employee_Class') +
+               nodefactor('Sex') +
+               nodematch('Area', diff=T) + #match by area, each separately
+               nodematch('Location') + #match by location, in general
+               nodematch('Department') +
+               nodematch('Institute') +
+               edgecov(contactNet, attr='weight'), 
+             control=control.ergm(seed=40))
+summary(mod7)
+```
+The edge covariant is positively and significantly associated with the likelihood of 2 nodes collaborating.
+
+We can test including a local structural predictor as well, though. We have already seen that our network has more cliques than might be expected. We can include a geometicaly weighted edgewise shared partners predictor. A GWESP predictor suggests that people that an employee collaborates with also probably collaborate with each. When this happens, you'll see more cliques in your network.
+
+```{r}
+mod8 <- ergm(cnet ~ edges +
+             nodecov('ZoomMinutes') +
+             nodecov('ZoomParticipants') +
+               nodefactor('Employee_Class')+
+               nodematch('Employee_Class')+
+               #nodefactor('Sex') + #no longer significant
+               nodematch('Area', diff=T) + #match by area, each separately
+               nodematch('Location') + #match by location, in general
+               nodematch('Department') +
+               nodematch('Institute') +
+               edgecov(contactNet, attr='weight') +
+              gwesp(1.2, fixed=TRUE), #measures effects of local clustering (transitivity), the alpha discounts shared partners beyond the initial shared partner. The closer to zero, the more dramatic the discounting
+             control=control.ergm(seed=40))
+summary(mod8)
+```
+GWESP is positively and significantly associated with the likelihood of 2 colleagues collaborately.
+
+We can also try adding in a geometrically weighted degree effect. This measures the effect of the degrees of the nodes involved, gradually decreasing the effect as more nodes are involved.
+
+```{r}
+mod9 <- ergm(cnet ~ edges +
+             nodecov('ZoomMinutes') +
+             nodecov('ZoomParticipants') +
+               nodefactor('Employee_Class')+
+               nodematch('Employee_Class')+
+               #nodefactor('Sex') +
+               
+               nodematch('Area', diff=T) + #match by area, each separately
+               nodematch('Location') + #match by location, in general
+               nodematch('Department') +
+               nodematch('Institute') +
+              gwesp(1.2, fixed=TRUE) + #measures effects of local clustering (transitivity), the alpha discounts shared partners beyond the initial shared partner. The closer to zero, the more dramatic the discounting   
+               gwdegree(.7, fixed=TRUE), # measures effects of degrees of nodes involved. 
+             control=control.ergm(seed=40))
+summary(mod9)
+
+
+
+```
+
+While the GWDEG parameter is negatively and significantly associated with the likelihood of 2 colleagues collaborating, adding in this parameter did not improve our AIC. We can remove this parameter for the sake of a more parsimonious model.
+
+We can also test removing our two least significant predictors - nodematch on employee_class and nodematch on department. Each were removed separately and both were removed. With just nodematch('Employee_Class') or just nodematch('Department') the AIC rose to 1299. With both removed, the AIC rose to 1300. Arguably, the small difference in AIC is a worthwhile trade-off for a simpler model. But our model 8 is not particularly complicated, and it's reasonable to proceed with it based on the lowest AIC.
+
+
+```{r}
+mod10 <- ergm(cnet ~ edges +
+             nodecov('ZoomMinutes') +
+             nodecov('ZoomParticipants') +
+               nodefactor('Employee_Class')+
+               #nodematch('Employee_Class')+
+               #nodefactor('Sex') + #no longer significant
+               nodematch('Area', diff=T) + #match by area, each separately
+               nodematch('Location') + #match by location, in general
+               nodematch('Institute') +
+               nodematch('Program') +
+               edgecov(contactNet, attr='weight') +
+              gwesp(1.2, fixed=TRUE), #measures effects of local clustering (transitivity), the alpha discounts shared partners beyond the initial shared partner. The closer to zero, the more dramatic the discounting
+             control=control.ergm(seed=40))
+summary(mod10)
+```
+```{r}
+mod11 <- ergm(cnet ~ edges +
+             nodecov('ZoomMinutes') +
+             nodecov('ZoomParticipants') +
+               nodefactor('Employee_Class')+
+               nodematch('Employee_Class')+
+               #nodefactor('Sex') + #no longer significant
+               nodematch('Area', diff=T) + #match by area, each separately
+               nodematch('Location', diff=T) + #match by location, in general
+               nodematch('Department') +
+               nodematch('Institute') +
+               edgecov(contactNet, attr='weight') +
+              gwesp(1.2, fixed=TRUE), #measures effects of local clustering (transitivity), the alpha discounts shared partners beyond the initial shared partner. The closer to zero, the more dramatic the discounting
+             control=control.ergm(seed=40))
+summary(mod11)
+```
+
+That leaves us with this final model:
+
+```{r results="markup"}
+summary(mod8)
+```
+
+Based on these coefficients, we can calculate the likelihood of 2 colleagues forming a tie. For example, if we have 1 Faculty member from the ANR Department and Agriculture Institute who works in Area 10 and has spent 1000 minutes in Zoom meetings with 20 participants and one faculty member from the ANR Department and Natural Resources Institute who works in Area 2 who has spent 100 minutes in Zoom meetings with 2 participants, and these 2 Faculty members share 3 edgewise partners and have contact often, we can calculate the likelihood that they will collaborate by running this formula:
+
+```{r echo=TRUE}
+plogis(-6.0198056 + #edges
+         2*0.6368449 + #faculty
+         0.3055619 + #both faculty (node match) 
+         0.2871169 + #matching departments
+         1100*0.0015947 + #zoom minutes
+         22*-0.0698162  + #zoom participants
+         0.5946841*(1-exp(-1.2)^3) + #edgewise shared partners = Cgwesp * (1-exp(-alpha)^ESPij) 
+         2*0.3389310 #contact often (2)
+         )
+gden(cnet)
+```
+
+The results of this formula suggest that these 2 colleagues would be 6.4% likely to collaborate. Our overall network density is 10.7%, which suggests that these two colleagues are less likely to collaborate than might be expected in our network.
+
+If these two colleagues were in the same area (say, both in Area 10) and the same county, we would use the following formula:
+```{r echo=TRUE}
+
+plogis(-6.0198056 + #edges
+         2*0.6368449 + #faculty
+         0.3055619 + #both faculty (node match) 
+         0.2871169 + #matching departments
+         1100*0.0015947 + #zoom minutes
+         22*-0.0698162  + #zoom participants
+         0.5946841*(1-exp(-1.2)^3) + #edgewise shared partners = Cgwesp * (1-exp(-alpha)^ESPij) 
+         2*0.3389310 + #contact often (2)
+  
+         1.3329971 + #matching Area 10
+         1.9273653 #matching location
+         )
+
+
+```
+
+These two colleagues would be 64.1% likely to collaborate, which is much more than we would expect based on our overall network density.
+
+
+This model gives us the following odds ratios:
+
+```{r results="markup"}
+########################################
+# Computing odds rations gives you the odds with respect to the reference group for categorical variables
+#OddsRatio
+or <-exp(mod8$coef )
+#or #odds ratio
+###########
+#this bit gives you lower and upper bounds
+###########
+ste<-sqrt(diag(mod8$covar ))
+lci<-exp(mod8$coef-1.96*ste)
+uci<-exp(mod8$coef+1.96*ste)
+oddsratios<-rbind(round(lci,digits= 2),round(or,digits=2),round(uci,digits =2), round((uci-lci), digits=2))
+oddsratios<-t(oddsratios)
+
+colnames(oddsratios) <-c("Lower","OR","Upper", "Difference")
+oddsratios <- as.data.frame(oddsratios)
+
+
+kable(oddsratios[order(-oddsratios$OR), ], caption="Odds Ratios for Model 8")
+
+kable(oddsratios[order(-oddsratios$Difference), ], caption="Odds Ratios for Model 8")
+```
+
+These odds ratios represent the likelihood of a tie with respect to the reference group for a categorical variable. For example, there are three employee classes: Academic Staff (the reference category), Faculty, and Limited staff. These odds ratios suggest that a Faculty member is 1.6 times more likely to form a collaboration tie than an academic staff member. If both members of the tie are are the same employee class, they are 1.4 times more likely to form a collaborative tie than members of different employee classes. 
+
+For numerical variables, the odds ratios represent the likelihood of a tie for a unit change in the predictor. For example, for each additional minute spent in Zoom meetings, employees are .00024 times more likely to form a collaborative tie. 
+
+
+## Goodness of Fit
+```{r}
+mod8.fit <- gof(mod8,
+               GOF = ~distance + espartners +
+              degree + triadcensus,
+              burnin=1e+5, interval = 1e+5 )
+mod8.fit
+
+```
+
+
+
+Overall, our model shows a very good fit. Out of all of the parameters reported, only 2 show a p-value under .05 - Degree 6 and 10 edgewise shared partners. 
+
+We can look at the results of these tests with plots as well.
+
+```{r}
+op <- par(mfrow=c(3,2))
+plot(mod8.fit,cex.axis=1.6,cex.label=1.6)
+par(op)
+
+```
+
+We can also look into full diagnosistics.
+
+```{r}
+mcmc.diagnostics(mod8)
+```
+Finally, we can simulate a network based on our model and compare it to our observed network.
+
+```{r results="markup"}
+nullsim <- simulate(mod0, seed=40)
+mainsim <- simulate(mod8,  seed=40)
+
+rowgof<-rbind(summary(cnet~ edges + degree(0:10) + triangle),
+              summary(nullsim~ edges + degree(0:10) + triangle),
+              summary(mainsim~ edges + degree(0:10) + triangle)) 
+
+rownames(rowgof) <-c("Extension Network", "Null","Main") 
+kable(rowgof, caption = 'Our Network compared to simulated networks')
+
+
+```
+
+The simulation suggests reasonably good fit. There is some variance in Degree 1, which in our observed network is 7, but in our simulation is only 1, and the opposite effect in Degree 3, which in our network is 1, but in our simulation is 8. I honestly don't know how "on" the simulation needs to be to be considered a good fit.
