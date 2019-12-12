@@ -1,0 +1,724 @@
+---
+title: "UW-Madison Division of Extension Situational Analysis"
+author: "Deanna Schneider"
+date: "April 2, 2019"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Background and Data Collection
+
+Each year, colleagues at the UW-Madison Division of Extension submit plans of work. One component of their plan of work is a "situation statement." A situation statement is a concise summary of relevant existing data sources (e.g. local, state or national) and new data/findings (e.g., specific information that the employee or partners have collected for the purposed of developing needed and helpful programming). The situation statements guide the rest of the plan of work, which should be a response to whatever issues are raised in the situation statement.
+
+Analyzing these situation statements for topics could provide Extension leadership with a fast high-level view of what our boots-on-the-ground staff see as the most pressing issues for the people of Wisconsin.
+
+In addition to the text itself, employees also tag their plan of work with one or more of our 6 institutes, and one or more of our 22 programmatic areas. (Programmatic areas are beneath institutes in our educational programs heirarchy.) These variables will not be included in the text analysis itself, but will be used as a baseline set of topics for topic modeling.
+
+Data was loaded from a pipe-delimited text file.
+
+```{r loadPackages}
+#install_github("cbail/textnets")
+pacman::p_load('readr','tm', 'topicmodels', 'SnowballC', 'servr', 'stringi', 'LDAvis', 'ggplot2', 'devtools', 'dplyr', 'Matrix', 'tidytext', 'stringr','reshape2', 'phrasemachine', 'igraph', 'ggraph', 'networkD3', 
+               'udpipe', 'wordcloud','gridExtra','grid','knitr','sqldf')
+
+```
+
+```{r fetchData}
+#read in the data. This only works with read_delim, because of weird characters
+statements <- read_delim(file='SituationStatements.csv', delim ='|')
+
+allcount <-nrow(statements)
+
+#clean up the non graphical characters: https://stackoverflow.com/questions/9637278/r-tm-package-invalid-input-in-utf8towcs
+statements$Segment <- iconv(statements$Segment, "latin1", "ASCII", "")
+
+#we're only going to use statements are the aligned with a single Institutes
+statements <- statements[which((statements$I_HDR + statements$I_AG + statements$I_CD + statements$I_HWB + statements$I_NR + statements$I_PYD) == 1), ]
+
+singlecount <- nrow(statements)
+
+allcount
+singlecount
+allcount-singlecount
+singlecount/allcount
+
+#convert our dummy columns back to a factor
+header <- unlist(strsplit(colnames(statements), '[_]'))[2*3:8]
+dummies <- as.matrix(statements[, 4:9])
+
+#add the factor to our dataframe
+statements$institute <- factor(dummies %*% 1:ncol(dummies), labels = header)
+#add the document name to ID to get unique, but readable document names
+statements$name <- paste(statements$ID, statements$Document_Name, "-")
+
+#cleanup
+rm(dummies,header,allcount,singlecount)
+
+```
+
+After the data has been fetched and we've limited it to just those rows we want to keep, we need to clean and tokenize the data. We can use the upPipe package to tokenize and stem our words.
+
+```{r dataCleaning1}
+
+#get the stopwords from snowball
+stops <- get_stopwords(language="en")
+#get our custom stopwords
+stopwords <- read.csv('stopwords.csv')
+#add the extra column for lexicon
+stopwords$lexicon <- 'UWEX'
+#join the stopwords
+stopwords <- rbind(stops, stopwords)
+
+
+
+cleanData <- function(textdata, textvar, groupvar, stopwords){
+  # download udpipe language model
+  lang_mod <- udpipe_download_model(language = 'english')
+  # set up udpipe language model for pos tagging
+  udmodel_lang <- udpipe_load_model(file = lang_mod$file_model)
+  
+  #for testing
+  #textdata=statements; textvar = "Segment"; groupvar = "ID"; stopwords=stopwords
+  
+  #clean up urls
+  textdata[[textvar]] <-  gsub("http[[:alnum:]]*", "", textdata[[textvar]])
+  #get rid of numbers
+  textdata[[textvar]]<-gsub('[[:digit:]]+', "",textdata[[textvar]])
+  #replace punctuation with a space
+  textdata[[textvar]]<-gsub('[[:punct:]]+', " ",textdata[[textvar]])
+  #put 4-H back in
+  textdata[[textvar]]<-gsub(' H ', " fourh ",textdata[[textvar]])
+
+  
+  # we use tidytext to flexibly tokenize words or tweets
+    textdata_tokens <- as_tibble(textdata) %>%
+      select(groupvar, textvar) %>%
+      unnest_tokens_(output = "word", input = textvar, token = "words", strip_punct = FALSE)
+    
+    # then we prepare the tokenized documents for dependency parsing
+    textdata_tokens <- textdata_tokens %>% 
+      group_by_(groupvar) %>% 
+      summarise(documents = paste(word, collapse = "\n"))
+    
+    # parse dependencies with udpipe
+    textdata_dep <- as.data.frame(udpipe_annotate(udmodel_lang, x = textdata_tokens$documents,
+                                                  doc_id = textdata_tokens[[groupvar]],
+                                                  tagger = "default", parser = "default"))
+    
+    # rename df and groupvar to avoid redudant coding
+    textdata <- textdata_dep
+    names(textdata)[1] <- groupvar
+    
+    #filter to just nouns and proper nouns
+    textdata <- textdata %>% 
+      filter(upos%in%c("NOUN", "PROPN"))
+    
+     #remove stopwords
+    textdata <- textdata %>% 
+      anti_join(stopwords, by = c("lemma" = "word"))
+    
+    #we still need to remove our custom stopwords (counties) from the compound nouns
+    #fetch each word in our stop words dataframe
+    words_d <- as.vector(stopwords[which(stopwords$lexicon=='UWEX'), 1])
+    words_v <- words_d[['word']]
+    
+    #for testing
+    #textdata2 <- textdata
+    
+    '%nin%' <- Negate('%in%')
+    lemma2 <- lapply(textdata[,7], function(x) {
+          t <- unlist(strsplit(x, " "))
+          out <-  ''
+          for (word in t){
+          if(word %nin% words_v){
+            out <- paste(out, word, sep = " ")
+          }
+          }
+          return(trimws(out, which='both'))
+      })
+    
+
+    textdata$lemma <- as.character(lemma2)
+    
+    return(textdata)
+}
+
+
+#clean the data and pass back just the cleaned segments and IDs
+textdata = cleanData(statements, textvar = "Segment", groupvar = "ID", stopwords=stopwords)
+cleaned <- textdata %>%  
+    group_by(ID) %>%
+    mutate(segment = paste0(lemma, collapse=" ")) 
+    
+#return just the cleaned words with ID
+cleaned <- unique(cleaned[, c('ID', 'segment')])
+    
+
+#add institute to our cleaned data
+cleaned$institute <- statements$institute
+
+
+
+gData <- cleaned %>%
+  dplyr::count(institute, sort=TRUE) %>%
+  dplyr::group_by(institute) %>%
+  dplyr::summarize(total = sum(n))
+
+gData$institute <- factor(gData$institute, levels = gData$institute[order(-gData$total)])
+#look at distribution of institutes in general
+ggplot(data=gData, aes(x=as.factor(institute), y=total)) +
+geom_bar(stat="identity") +
+  ggtitle("Distribution of Statements by Identified Institute") +
+  xlab('Institutes') +
+theme_classic()
+
+dev.print(png, file = "InstituteGraph.png", width = 400, height = 300)
+
+#cleanup
+rm(stops, stopwords, cleanData,gData)
+
+```
+
+
+
+Now that we have a cleaned dataset, we can make a corpus for topic modeling.
+
+```{r getFreqs}
+#make a corpus based off the "segment"
+docs <- Corpus(VectorSource(cleaned$segment))
+#review
+inspect(docs[1])
+
+#Create document-term matrix
+dtm <- DocumentTermMatrix(docs)
+#collapse matrix by summing over columns
+freq <- colSums(as.matrix(dtm))
+
+#get the dimensions - number of terms
+dim(dtm)
+#look at the first 10 rows and 5 columns
+inspect(dtm)[1:10,1:5]
+
+
+
+```
+We have 3492 unique terms in our corpus, in 388 documents.
+
+
+```{r runLDA}
+
+##########################
+# This function lets me run lda and pass back data with various K
+##########################
+testK <- function(dtm, k, numTerms=10){
+  
+  #Set parameters for Gibbs sampling - these parameters control how many gibbs sampling draws are made
+  burnin <- 1000
+  iter <- 1000
+  thin <- 100
+  nstart <- 5
+  seed <- rep(5, nstart)
+  best <- TRUE
+  
+  
+  #Run LDA using Gibbs sampling ********************* Item to pass back
+  ldaOut <- LDA(dtm,k, method="Gibbs", control=list(nstart=nstart,
+                                                    seed = seed,
+                                                    best=best,
+                                                    burnin = burnin,
+                                                    iter = iter))
+  
+  #get the topics as a matrix 
+  topics <- as.matrix(topics(ldaOut)) #***************** Item to pass back
+
+  #write to file, in case we want to analyze it again
+  write.csv(topics,file=paste("LDAGibbs",k,"DocsToTopics.csv",sep="_"))
+  
+  #top n terms in each topic (defaults to 10)
+  topTerms <- as.matrix(terms(ldaOut,numTerms)) #************************* Item to pass back
+  write.csv(topTerms,file=paste("LDAGibbs",k,"TopTenTopics.csv",sep="_"))
+  
+  #probabilities associated with each topic assignment
+  probabilities <- as.data.frame(ldaOut@gamma) #******************* Item to pass back
+  write.csv(probabilities,
+            file=paste("LDAGibbs",k,"TopicProbabilities.csv",sep="_"))
+  
+
+results <- list(ldaOut=ldaOut,topics=topics, topTerms = topTerms, probabilities = probabilities)
+
+return(results)
+}
+
+
+
+#Number of topics - let's look at the 6 (one for each institute)
+lda6 <- testK(dtm, 6, 10)
+#let's look at 4, since we recently had just 4 main program areas
+lda4 <- testK(dtm, 4, 10)
+#depending on how you count programs, we have 17, 21 or 29
+lda17 <- testK(dtm, 17, 10)
+lda21 <- testK(dtm, 21, 10)
+lda29 <- testK(dtm, 29, 10)
+#these all seem like too much Let's try some intermediate numbers
+
+lda10 <- testK(dtm, 10, 10)
+
+summary(lda6)
+summary(lda4)
+```
+With the topic models created, we can add the most likely topic for each word back to our dataframe of words.
+
+```{r writeTopics}
+
+#combine this with the information from the in file
+cleaned$topic6 <- lda6$topics
+cleaned$topic4 <- lda4$topics
+cleaned$topic10 <- lda10$topics
+cleaned$topic17 <- lda17$topics
+cleaned$topic21 <- lda21$topics
+cleaned$topic29 <- lda29$topics
+
+#write to file, in case we want to analyze it again
+write.csv(cleaned,file='LDAGibbsStatementsWithTopics.csv')
+
+
+#review terms as needed
+lda6$topTerms
+```
+
+With that done, we can produce visualizations that compare.
+
+```{r topicFreq}
+
+levels(cleaned$institute)
+
+cleaned$institute <- factor(cleaned$institute, levels = c('AG','NR', 'CD', 'HWB', 'HDR', 'PYD'))
+
+#create a palette that groups related institutes
+myPallete <- c('navajowhite4','sandybrown','tan4','skyblue4','skyblue1','darkgreen')
+
+#Visualize These Results
+p4 <- ggplot(data=cleaned, aes(x=as.factor(topic4), fill=institute)) +
+geom_bar() +
+  ggtitle("4 topics") + xlab("Modeled Topic Number") +
+  scale_fill_manual(values=myPallete) + theme_classic()
+p6 <- ggplot(data=cleaned, aes(x=as.factor(topic6), fill=institute)) +
+geom_bar() +
+  ggtitle("6 topics") + xlab("Modeled Topic Number") +
+  scale_fill_manual(values=myPallete) + theme_classic()
+
+p10 <- ggplot(data=cleaned, aes(x=as.factor(topic10), fill=institute)) +
+geom_bar() +
+  ggtitle("10 topics") + xlab("Modeled Topic Number") +
+  scale_fill_manual(values=myPallete) + theme_classic()
+
+p17 <- ggplot(data=cleaned, aes(x=as.factor(topic17), fill=institute)) +
+geom_bar() +
+  ggtitle("17 topics") + xlab("Modeled Topic Number") +
+  scale_fill_manual(values=myPallete) + theme_classic()
+p21 <- ggplot(data=cleaned, aes(x=as.factor(topic21), fill=institute)) +
+geom_bar() +
+  ggtitle("21 topics") + xlab("Modeled Topic Number") +
+  scale_fill_manual(values=myPallete) + theme_classic()
+p29 <- ggplot(data=cleaned, aes(x=as.factor(topic29), fill=institute)) +
+geom_bar() +
+  ggtitle("29 topics") + xlab("Modeled Topic Number") +
+  scale_fill_manual(values=myPallete) + theme_classic()
+
+
+#extract legend
+#https://github.com/hadley/ggplot2/wiki/Share-a-legend-between-two-ggplot2-graphs
+g_legend<-function(a.gplot){
+  tmp <- ggplot_gtable(ggplot_build(a.gplot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  return(legend)}
+
+mylegend<-g_legend(p6)
+#gs <- lapply(1:4, function(ii)
+    #grobTree(rectGrob(gp=gpar(fill=ii, alpha=0.5)), textGrob(ii)))
+lay1 <- rbind(c(1,1,2,2,3),
+             c(1,1,2,2,3))
+#grid.arrange(grobs = gs, layout_matrix = lay)
+
+grid.arrange(arrangeGrob(p4 + theme(legend.position="none"),
+                         p6 + theme(legend.position="none"),
+                         mylegend,
+                         layout_matrix=lay1)
+             )
+dev.print(png, file = "LDAComparedInstitutes.png", width = 400, height = 300)
+
+
+lay2 <- rbind(c(1,1,1,1,5),
+             c(2,2,2,2,5),
+             c(3,3,3,3,5),
+             c(4,4,4,4,5))
+
+grid.arrange(arrangeGrob(p10 + theme(legend.position="none"),
+                         p17 + theme(legend.position="none"),
+                         p21 + theme(legend.position="none"),
+                         p29 + theme(legend.position="none"),
+                         mylegend,
+                         layout_matrix=lay2)
+             )
+
+dev.print(png, file = "LDAComparedPrograms.png", width = 1024, height = 800)
+
+#cleanup
+rm(lay1,lay2,mylegend,p4,p6,p17,p21,p29)
+
+```
+
+Now that we've created LDA objects with various numbers of models, we can visualize them using the ldaViz package.
+```{r vizSetup}
+###################################################
+# Visualizing the topic models
+###################################################
+## ----echo=FALSE, warning=FALSE-------------------------------------------
+topicmodels_json_ldavis <- function(fitted, corpus, doc_term) {
+  # Find required quantities
+  phi <- posterior(fitted)$terms %>% as.matrix
+  theta <- posterior(fitted)$topics %>% as.matrix
+  vocab <- colnames(phi)
+  
+  doc_length <- vector()
+  
+  for (i in 1:length(corpus)) {
+    temp <- paste(corpus[[i]]$content, collapse = ' ')
+    doc_length <- c(doc_length, stri_count(temp, regex = '\\S+'))
+  }
+  
+  # Convert to json
+  json_lda <- LDAvis::createJSON(phi = phi, theta=theta,
+                                 vocab = vocab,
+                                 doc.length = doc_length,
+                                 term.frequency = doc_term)
+  #freq_matrix$Freq
+  return(json_lda)
+}
+
+
+```
+
+```{r viz4}
+###now provide values and run the function
+json4 <- topicmodels_json_ldavis(lda4$ldaOut, docs, freq)
+serVis(json4, out.dir = 'vis4', open.browser = TRUE)
+
+```
+
+```{r vis6}
+servr::daemon_stop(1)
+json6 <- topicmodels_json_ldavis(lda6$ldaOut, docs, freq)
+serVis(json6, out.dir = 'vis6', open.browser = TRUE)
+```
+```{r vis10}
+servr::daemon_stop(2)
+json10 <- topicmodels_json_ldavis(lda10$ldaOut, docs, freq)
+serVis(json10, out.dir = 'vis10', open.browser = TRUE)
+```
+
+```{r vis17}
+servr::daemon_stop(2)
+json17 <- topicmodels_json_ldavis(lda17$ldaOut, docs, freq)
+serVis(json17, out.dir = 'vis17', open.browser = TRUE)
+```
+```{r vis21}
+servr::daemon_stop(3)
+json21 <- topicmodels_json_ldavis(lda21$ldaOut, docs, freq)
+serVis(json21, out.dir = 'vis21', open.browser = TRUE)
+```
+```{r vis29}
+servr::daemon_stop(4)
+json29 <- topicmodels_json_ldavis(lda29$ldaOut, docs, freq)
+serVis(json29, out.dir = 'vis29', open.browser = TRUE)
+```
+
+#Networks of Texts
+
+```{r graphFunctions}
+#rescale function for node size
+rescale <- function(nchar,low,high) {
+min_d <- min(nchar)
+max_d <- max(nchar)
+rscl <- ((high-low)*(nchar-min_d))/(max_d-min_d)+low
+rscl
+}
+
+#use a function add transparency
+#https://github.com/mylesmharrison/colorRampPaletteAlpha/blob/master/colorRampPaletteAlpha.R
+addalpha <- function(colors, alpha=1.0) {
+  r <- col2rgb(colors, alpha=T)
+  # Apply alpha
+  r[4,] <- alpha*255
+  r <- r/255.0
+  return(rgb(r[1,], r[2,], r[3,], r[4,]))
+}
+
+
+```
+
+
+We can make a network of the most frequently occuring nouns by topic, and their relationships with topics
+
+First will look at the 6-topic model.
+
+```{r}
+
+#Add the institute to the textdata
+textWithInstitute <- textdata %>% inner_join(cleaned, by="ID", copy=T)
+
+#count our words by document (topic6)
+nouns6 <- textWithInstitute %>%
+  count(topic6, lemma, sort=TRUE)
+
+#count total words per topic6
+total_words6 <- nouns6 %>%
+  group_by(topic6) %>%
+  summarize(Wtotal = sum(n))
+
+#count total topics per word
+total_t6 <- nouns6 %>%
+  group_by(lemma) %>%
+  summarize(Ttotal = n_distinct(topic6))
+
+nouns6 <- left_join(nouns6, total_words6)
+nouns6 <- left_join(nouns6, total_t6)
+
+#Look at the 10 most frequently used words in each topic
+sharednouns6 <-  nouns6 %>%
+  #filter(n > 10) %>%
+  #filter(Itotal > 3) %>%
+  group_by(topic6) %>%
+  top_n(n=10, wt=n) %>%
+  arrange((desc(n)))
+
+sn_m6 <- as.matrix(sharednouns6[, 1:2])
+sn_g6 <- graph_from_edgelist(sn_m6, directed=F)
+E(sn_g6)$weight <- sharednouns6$n
+
+#add a type variable the same length as the list of vector names
+V(sn_g6)$type <- rep(0, length(V(sn_g6)$name))
+
+#update the ones that are topics
+V(sn_g6)$type[which(V(sn_g6)$name %in% c('1','2','3','4','5', '6'))] <- 1
+#add color variable
+V(sn_g6)$color <- rep(addalpha('grey73', .5), length(V(sn_g6)$name))
+V(sn_g6)$color[which(V(sn_g6)$type == 1)] <- addalpha('red3', .5)
+
+#add shape variable
+V(sn_g6)$shape <- rep('none', length(V(sn_g6)$name))
+V(sn_g6)$shape[which(V(sn_g6)$type == 1)] <- 'circle'
+
+
+
+sn_g6_coords <- read.csv('coordinates6.csv')
+plot(sn_g6,
+     vertex.color = V(sn_g6)$color,
+     vertex.shape = V(sn_g6)$shape,
+     vertex.label.cex = rescale(degree(sn_g6), .75, 2),
+    vertex.label.color = 'black',
+    edge.width=rescale(E(sn_g6)$weight, 1,5),
+    vertex.size = rescale(degree(sn_g6), 15, 25),     layout=as.matrix(sn_g6_coords[, 2:3])      
+     )
+dev.print(png, file = 'sharedwordsnet6.png', width = 600, height = 600)
+
+
+```
+
+```{r fig.width=10}
+#Add the institute to the textdata
+textWithInstitute <- textdata %>% inner_join(cleaned, by="ID", copy=T)
+
+#count our words by document (topic4)
+nouns4 <- textWithInstitute %>%
+  count(topic4, lemma, sort=TRUE)
+
+#count total words per topic6
+total_words4 <- nouns4 %>%
+  group_by(topic4) %>%
+  summarize(Wtotal = sum(n))
+
+#count total topics per word
+total_t4 <- nouns4 %>%
+  group_by(lemma) %>%
+  summarize(Ttotal = n_distinct(topic4))
+
+nouns4 <- left_join(nouns4, total_words4)
+nouns4 <- left_join(nouns4, total_t4)
+
+#Look at the 10 most frequently used words in each topic
+sharednouns4 <-  nouns4 %>%
+  #filter(n > 10) %>%
+  #filter(Itotal > 3) %>%
+  group_by(topic4) %>%
+  top_n(n=10, wt=n) %>%
+  arrange((desc(n)))
+
+sn_m4 <- as.matrix(sharednouns4[, 1:2])
+sn_g4 <- graph_from_edgelist(sn_m4, directed=F)
+E(sn_g4)$weight <- sharednouns4$n
+
+#add a type variable the same length as the list of vector names
+V(sn_g4)$type <- rep(0, length(V(sn_g4)$name))
+
+#update the ones that are topics
+V(sn_g4)$type[which(V(sn_g4)$name %in% c('1','2','3','4'))] <- 1
+#add color variable
+V(sn_g4)$color <- rep(addalpha('grey73', .5), length(V(sn_g4)$name))
+V(sn_g4)$color[which(V(sn_g4)$type == 1)] <- addalpha('red3', .5)
+
+#add shape variable
+V(sn_g4)$shape <- rep('none', length(V(sn_g4)$name))
+V(sn_g4)$shape[which(V(sn_g4)$type == 1)] <- 'circle'
+
+
+
+sn_g4_coords <- read.csv('coordinates4.csv')
+plot(sn_g4,
+     vertex.color = V(sn_g4)$color,
+     vertex.shape = V(sn_g4)$shape,
+     vertex.label.cex = rescale(degree(sn_g4), .75, 2),
+    vertex.label.color = 'black',
+    edge.width=rescale(E(sn_g4)$weight, 1,5),
+    vertex.size = rescale(degree(sn_g4), 15, 25),     layout=as.matrix(sn_g4_coords[, 2:3])      
+     )
+dev.print(png, file = 'sharedwordsnet4.png', width = 500, height = 500)
+
+```
+
+We can compare network statistics between these 2 networks
+```{r}
+#convert to non-bi-partite
+g6 <- graph_from_edgelist(as_edgelist(sn_g6), directed=F)
+g4 <- graph_from_edgelist(as_edgelist(sn_g4), directed=F)
+
+
+stats <- data.frame('4-topic model' =c(diameter(g4),edge_density(g4),mean_distance(g4),mean(degree(g4))), 
+                    '6-topic model' = c(diameter(g6),edge_density(g6),mean_distance(g6),mean(degree(g6)))
+)
+colnames(stats) <- c('4-topic model', '6-topic model')
+rownames(stats) <- c('diameter', 'density', 'average distance', 'average degree')
+
+kable(round(stats, 2))
+
+table(degree(g4))
+table(degree(g6))
+
+bi6 <- bipartite.projection(sn_g6)
+bi4 <- bipartite.projection(sn_g4)
+table(degree(bi6$proj1))
+table(degree(bi4$proj1))
+table(degree(bi6$proj2))
+table(degree(bi4$proj2))
+
+
+
+plot(bi6$proj2,
+           edge.width=rescale(E(bi6$proj2)$weight, 1,5))
+title('Bipartite Projection of 6-topic Model')
+dev.print(png, file = 'bi6.png', width = 600, height = 600)
+plot(bi4$proj2,
+           edge.width=rescale(E(bi4$proj2)$weight, 1,5))
+title('Bipartite Projection of 4-topic Model')
+dev.print(png, file = 'bi4.png', width = 600, height = 600)
+
+
+edge_density(bi6$proj2)
+edge_density(bi4$proj2)
+
+```
+
+We can also look at the unique nouns by topics
+```{r uniqueNouns, fig.width=10, fig.height=15}
+
+
+#get a new dataframe
+unique4 <- textWithInstitute %>%
+  count(topic4, lemma, sort=TRUE)
+
+#count total words per topic4
+total_words <- unique4 %>%
+  group_by(topic4) %>%
+  summarize(Wtotal = sum(n))
+
+#get tf idf by topic4
+unique4 <- unique4 %>% bind_tf_idf(lemma, topic4, n)
+
+
+
+
+  unique4 %>%
+  arrange(desc(tf_idf))%>%
+  mutate(word = factor(lemma, levels = rev(unique(lemma)))) %>% 
+  group_by(as.factor(topic4)) %>% 
+  top_n(10, wt=tf_idf) %>% 
+  ungroup() %>%
+  ggplot(aes(word, tf_idf)) +
+  #scale_fill_manual(values=myPallete) +
+  geom_col(show.legend = FALSE) +
+  labs(x = NULL, y = "tf-idf") +
+  facet_wrap(~topic4, ncol = 2, scales = "free") +
+  coord_flip() +
+    theme_classic()
+
+dev.print(png, file = 'uniquewords4.png', width = 300, height = 300)
+
+```
+
+
+```{r uniqueNouns, fig.width=10, fig.height=15}
+
+
+#get a new dataframe
+unique6 <- textWithInstitute %>%
+  count(topic6, lemma, sort=TRUE)
+
+#count total words per topic4
+total_words <- unique6 %>%
+  group_by(topic6) %>%
+  summarize(Wtotal = sum(n))
+
+#get tf idf by topic4
+unique6 <- unique6 %>% bind_tf_idf(lemma, topic6, n)
+
+
+
+
+  unique6 %>%
+  arrange(desc(tf_idf))%>%
+  mutate(word = factor(lemma, levels = rev(unique(lemma)))) %>% 
+  group_by(as.factor(topic6)) %>% 
+  top_n(10, wt=tf_idf) %>% 
+  ungroup() %>%
+  ggplot(aes(word, tf_idf)) +
+  #scale_fill_manual(values=myPallete) +
+  geom_col(show.legend = FALSE) +
+  labs(x = NULL, y = "tf-idf") +
+  facet_wrap(~topic6, ncol = 2, scales = "free") +
+  coord_flip() +
+    theme_classic()
+
+dev.print(png, file = 'uniquewords6.png', width = 400, height = 400)
+
+```
+
+
+
+
+
+```{r}
+#figure out which documents alice is in
+unique(textdata[which(textdata$lemma == 'alice'), 'ID'])
+inspect(docs[[65]])
+
+#find out what jone is
+unique(textdata[which(textdata$lemma == 'jone'), 'ID'])
+
+as.character(statements[which(statements$ID == 85), 'Segment'])
+
+```
