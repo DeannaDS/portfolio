@@ -48,4 +48,4 @@ This project was completed as part of the course DS745 - Visualization and Unstr
 
 This project was completed as part of the course DS745 - Data Mining and Machine Learning. It uses R to analyze situation statements that were submitted by Extension colleagues as part of their 2019 plans of work. It uses R and various text mining approaches to explore and visualize topics.
 
-[View the Project](SituationStatementAnalysis)
+[View the Project](SituationStatementsAnalysis)
