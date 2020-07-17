@@ -1,0 +1,1866 @@
+---
+title: "Chequamegon Bay Regional Food System Network Analysis"
+author: "Deanna Schneider"
+date: "June, 2020"
+output:
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=F, message=F, echo = F, results = 'hide', fig.width=10, fig.height=10)
+
+pacman::p_unload('statnet')
+pacman::p_load("igraph","sqldf","intergraph","RColorBrewer", "knitr", "blockmodeling", "tidyverse")
+
+
+#utility functions
+#use a function add transparency
+#https://github.com/mylesmharrison/colorRampPaletteAlpha/blob/master/colorRampPaletteAlpha.R
+addalpha <- function(colors, alpha=1.0) {
+  r <- col2rgb(colors, alpha=T)
+  # Apply alpha
+  r[4,] <- alpha*255
+  r <- r/255.0
+  return(rgb(r[1,], r[2,], r[3,], r[4,]))
+}
+#rescale function for node size
+rescale <- function(nchar,low,high) {
+min_d <- min(nchar)
+max_d <- max(nchar)
+rscl <- ((high-low)*(nchar-min_d))/(max_d-min_d)+low
+rscl
+}
+```
+
+
+## Dealing with Missing Data
+
+The following code imputes the missing values for our nonrespondents based on the K-nearest neighbors, falling back to incoming tie unconditional mean when the nearest neighbors are all 0.
+
+
+```{r}
+#----------------------------------------------------------------------------------------#
+#code from: https://ars.els-cdn.com/content/image/1-s2.0-S0378873315301684-mmc1.txt
+#Žnidaršič, A., Ferligoj, A., & Doreian, P. (2017). Actor non-response in valued social networks: The impact of different non-response treatments on the stability of blockmodels. Social Networks, 48, 46-56. https://doi.org/10.1016/j.socnet.2016.06.001
+#----------------------------------------------------------------------------------------#
+# First, the Euclidean distances between actors are computed based on the values of their
+# incoming ties. Then, for each non-respondent, the median value of corresponding outgoing
+# ties of 3-nearest neighbours is imputed instead of missing outgoing tie values of
+# non-respondents.
+#----------------------------------------------------------------------------------------#
+actorNonresponseTreatment_kNNMedian<-function(net, ind.nonrespondents){
+### net - network in a matrix form
+### ind.nonrespondents - vector of indices of missing actors
+#read in the complete matrix
+#net = read.csv('R_complete_matrix.csv')  
+  
+n<-dim(net)[1]
+k<-5   ### 5 nearest neighbours are used to impute missing ties 
+diag(net)<-NA
+d<-dist(t(net)[,setdiff(1:n,ind.nonrespondents)],method = "euclidean",diag=TRUE,upper=TRUE)
+for(i in 1:length(ind.nonrespondents)){
+	ind<-sort(as.matrix(d)[ind.nonrespondents[i],], decreasing=FALSE,index.return=TRUE)$ix[2:(k+1)]
+	kNNMedian<-round(apply(net[ind,],2,FUN="median",na.rm=TRUE),0)
+	net[ind.nonrespondents[i],]<-kNNMedian}
+diag(net)<-0
+return(net)}
+
+
+#----------------------------------------------------------------------------------------#
+# This function imputes missing (0) row values with mean of column values
+#----------------------------------------------------------------------------------------#
+actorNonresponseTreatment_MEAN<-function(net){
+### net - network in a matrix form
+### ind.nonrespondents - vector of indices of missing actors
+diag(net)<-NA
+n<-dim(net)[1]
+net <- replace(net, net==0, NA)
+for(i in 1:ncol(net)){
+  net[is.na(net[,i]), i] <- round(mean(net[,i], na.rm = TRUE))
+}
+diag(net)<-0
+net[which(net>5)]<-5
+return(net)}
+
+
+#read in the csv of edges
+edges <- as.matrix(read.csv('R_edges.csv'))
+#convert it to an igraph object
+allPossibleEdges <- graph_from_edgelist(edges[,1:2], directed=T)
+#add the type 
+E(allPossibleEdges)$type <- as.numeric(edges[,3]) 
+#add the distance
+E(allPossibleEdges)$distance <- as.numeric(edges[,4])
+
+#convert it back to a matrix, with names, to store them
+net <- as_adj(allPossibleEdges, type="both", attr="type", names=T)
+
+
+#set the diagonal to zero
+diag(net)<-0
+
+#plot the network with missing data
+plot.mat(net)
+
+#get the rows for non-respondents (using the first column)
+ind.NR <- which(net[,1] == 0)
+
+#impute using the 3 nearest neighbors
+net3NNMedian<-actorNonresponseTreatment_kNNMedian(as.matrix(net),ind.nonrespondents=ind.NR)
+netMean <- actorNonresponseTreatment_MEAN(as.matrix(net))
+
+sum(colSums(net3NNMedian == 0))
+
+### Plot the treated network.
+plot.mat(net3NNMedian)
+### Plot the 'differences' between original and treated network.
+plot.mat(net-net3NNMedian)
+
+plot.mat(netMean)
+
+
+
+```
+
+
+
+## Turn the complete matrix into an igraph object
+
+
+```{r}
+
+#turn all the edges into a graph object - start with a directed graph, we'll convert later
+allPossibleEdges <- graph_from_adjacency_matrix(netMean, mode="directed", diag=FALSE, weighted=TRUE)
+
+#read in the csv of edges to fetch the distance matrix
+distanceMatrix = read.csv('R_distance_matrix.csv')
+
+
+ 
+
+
+
+```
+
+
+## Read in the nodes.
+
+```{r}
+
+#read in the node data
+nodeData <- as.data.frame(read.csv('R_nodes.csv'))
+
+
+#get matches by index
+ix <- match(V(allPossibleEdges)$name, nodeData$Label)
+
+#set all the node attributes
+V(allPossibleEdges)$Name <- as.character(nodeData$Name[ix])
+V(allPossibleEdges)$ID <- nodeData$ID[ix]
+V(allPossibleEdges)$ERGMFlag <- as.character(nodeData$ERGMFlag[ix])
+V(allPossibleEdges)$Location <- as.character(nodeData$Location[ix])
+V(allPossibleEdges)$SelfEmployed <- as.character(nodeData$SelfEmployed[ix])
+V(allPossibleEdges)$BusinessName <- as.character(nodeData$BusinessName[ix])
+V(allPossibleEdges)$HasSecondJob <- as.character(nodeData$HasSecondJob[ix])
+V(allPossibleEdges)$Employer <- as.character(nodeData$Employer[ix])
+V(allPossibleEdges)$IncomePercent <- nodeData$IncomePercent[ix]
+V(allPossibleEdges)$SocialMediaFlag <- as.character(nodeData$SocialMediaFlag[ix])
+V(allPossibleEdges)$HoursOnSocialMedia <- as.character(nodeData$HoursOnSocialMedia[ix])
+V(allPossibleEdges)$OnlineMarketingFlag <- as.character(nodeData$OnlineMarketingFlag[ix])
+V(allPossibleEdges)$NetworkOverlap <- as.character(nodeData$NetworkOverlap[ix])
+V(allPossibleEdges)$IntrovertExtrovertScale <- nodeData$IntrovertExtrovertScale[ix]
+V(allPossibleEdges)$PersonalSelfDependence <- as.character(nodeData$PersonalSelfDependence[ix])
+
+V(allPossibleEdges)$WorkSelfDependence <- as.character(nodeData$WorkSelfDependence[ix])
+V(allPossibleEdges)$CollaborativeEconomicAdvantage <- as.character(nodeData$CollaborativeEconomicAdvantage[ix])
+V(allPossibleEdges)$CollaborationsNotWorthIt <- as.character(nodeData$CollaborationsNotWorthIt[ix])
+
+#onehots
+V(allPossibleEdges)$Roles <- as.character(nodeData$Roles[ix])
+V(allPossibleEdges)$Roles_Combined <- as.character(nodeData$Roles[ix])
+V(allPossibleEdges)$Roles_Buyer <- as.character(nodeData$Roles_Buyer[ix])
+V(allPossibleEdges)$Roles_DistributorWholesaler <- as.character(nodeData$Roles_DistributorWholesaler[ix])
+V(allPossibleEdges)$Roles_FoodSystemsEducator <- as.character(nodeData$Roles_FoodSystemsEducator[ix])
+V(allPossibleEdges)$Roles_Grower <- as.character(nodeData$Roles_Grower[ix])
+V(allPossibleEdges)$Roles_MarketManager <- as.character(nodeData$Roles_MarketManager[ix])
+V(allPossibleEdges)$Roles_NoneofThese <- as.character(nodeData$Roles_NoneofThese[ix])
+V(allPossibleEdges)$Roles_Other <- as.character(nodeData$Roles_Other[ix])
+V(allPossibleEdges)$Roles_RestaurateurCookChef <- as.character(nodeData$Roles_RestaurateurCookChef[ix])
+
+V(allPossibleEdges)$Roles_ValueAddedProducer <- as.character(nodeData$Roles_ValueAddedProducer[ix])
+
+V(allPossibleEdges)$VendorMarkets_Ashland <- as.character(nodeData$VendorMarkets_Ashland[ix])
+V(allPossibleEdges)$VendorMarkets_Bayfield <- as.character(nodeData$VendorMarkets_Bayfield[ix])
+V(allPossibleEdges)$VendorMarkets_Cable <- as.character(nodeData$VendorMarkets_Cable[ix])
+V(allPossibleEdges)$VendorMarkets_DuluthSuperior <- as.character(nodeData$VendorMarkets_DuluthSuperior[ix])
+V(allPossibleEdges)$VendorMarkets_MadelineIsland <- as.character(nodeData$VendorMarkets_MadelineIsland[ix])
+V(allPossibleEdges)$VendorMarkets_None <- as.character(nodeData$VendorMarkets_None[ix])
+V(allPossibleEdges)$VendorMarkets_Unknown <- as.character(nodeData$VendorMarkets_Unknown[ix])
+V(allPossibleEdges)$VendorMarkets_Washburn <- as.character(nodeData$VendorMarkets_Washburn[ix])
+V(allPossibleEdges)$VendorMarkets_Combined <- as.character(nodeData$VendorMarkets_Combined[ix])
+V(allPossibleEdges)$ConsumerMarkets_Ashland <- as.character(nodeData$ConsumerMarkets_Ashland[ix])
+V(allPossibleEdges)$ConsumerMarkets_Bayfield <- as.character(nodeData$ConsumerMarkets_Bayfield[ix])
+V(allPossibleEdges)$ConsumerMarkets_Cable <- as.character(nodeData$ConsumerMarkets_Cable[ix])
+V(allPossibleEdges)$ConsumerMarkets_Cornucopia <- as.character(nodeData$ConsumerMarkets_Cornucopia[ix])
+V(allPossibleEdges)$ConsumerMarkets_Duluth <- as.character(nodeData$ConsumerMarkets_Duluth[ix])
+V(allPossibleEdges)$ConsumerMarkets_MadelineIsland <- as.character(nodeData$ConsumerMarkets_MadelineIsland[ix])
+V(allPossibleEdges)$ConsumerMarkets_None <- as.character(nodeData$ConsumerMarkets_None[ix])
+V(allPossibleEdges)$ConsumerMarkets_Unknown <- as.character(nodeData$ConsumerMarkets_Unknown[ix])
+V(allPossibleEdges)$ConsumerMarkets_Washburn <- as.character(nodeData$ConsumerMarkets_Washburn[ix])
+V(allPossibleEdges)$ConsumerMarkets_Combined <- as.character(nodeData$ConsumerMarkets_Combined[ix])
+
+V(allPossibleEdges)$GroupAffiliations_HulingsRiceFoodCenter <- as.character(nodeData$GroupAffiliations_HulingsRiceFoodCenter[ix])
+V(allPossibleEdges)$GroupAffiliations_AERC <- as.character(nodeData$GroupAffiliations_AERC[ix])
+V(allPossibleEdges)$GroupAffiliations_AllianceforSustainability <- as.character(nodeData$GroupAffiliations_AllianceforSustainability[ix])
+V(allPossibleEdges)$GroupAffiliations_BadRiverFoodSovereignty <- as.character(nodeData$GroupAffiliations_BadRiverFoodSovereignty[ix])
+V(allPossibleEdges)$GroupAffiliations_BayfieldFoods <- as.character(nodeData$GroupAffiliations_BayfieldFoods[ix])
+V(allPossibleEdges)$GroupAffiliations_BeaserCommunityGarden <- as.character(nodeData$GroupAffiliations_BeaserCommunityGarden[ix])
+V(allPossibleEdges)$GroupAffiliations_ChequamegonCSA <- as.character(nodeData$GroupAffiliations_ChequamegonCSA[ix])
+V(allPossibleEdges)$GroupAffiliations_ChequamegonFoodCoopBoardofDirectors <- as.character(nodeData$GroupAffiliations_ChequamegonFoodCoopBoardofDirectors[ix])
+V(allPossibleEdges)$GroupAffiliations_FEAST <- as.character(nodeData$GroupAffiliations_FEAST[ix])
+V(allPossibleEdges)$GroupAffiliations_FarmBureau <- as.character(nodeData$GroupAffiliations_FarmBureau[ix])
+V(allPossibleEdges)$GroupAffiliations_FarmToSchool <- as.character(nodeData$GroupAffiliations_FarmToSchool[ix])
+V(allPossibleEdges)$GroupAffiliations_FarmersMarketBoard <- as.character(nodeData$GroupAffiliations_FarmersMarketBoard[ix])
+V(allPossibleEdges)$GroupAffiliations_InHerBoots <- as.character(nodeData$GroupAffiliations_InHerBoots[ix])
+V(allPossibleEdges)$GroupAffiliations_NationalFarmersOrganizationNFO <- as.character(nodeData$GroupAffiliations_NationalFarmersOrganizationNFO[ix])
+V(allPossibleEdges)$GroupAffiliations_None <- as.character(nodeData$GroupAffiliations_None[ix])
+V(allPossibleEdges)$GroupAffiliations_NorthlandCollegeprograms <- as.character(nodeData$GroupAffiliations_NorthlandCollegeprograms[ix])
+V(allPossibleEdges)$GroupAffiliations_Other <- as.character(nodeData$GroupAffiliations_Other[ix])
+V(allPossibleEdges)$GroupAffiliations_ReCliffCommunityFarm <- as.character(nodeData$GroupAffiliations_ReCliffCommunityFarm[ix])
+V(allPossibleEdges)$GroupAffiliations_SomeothermultiproducerCSA <- as.character(nodeData$GroupAffiliations_SomeothermultiproducerCSA[ix])
+V(allPossibleEdges)$GroupAffiliations_UWExtensionFarmilyorBootlakersGuild <- as.character(nodeData$GroupAffiliations_UWExtensionFarmilyorBootlakersGuild[ix])
+V(allPossibleEdges)$GroupAffiliations_Unknown <- as.character(nodeData$GroupAffiliations_Unknown[ix])
+V(allPossibleEdges)$GroupAffiliations_WisconsinFarmersUnion <- as.character(nodeData$GroupAffiliations_WisconsinFarmersUnion[ix])
+V(allPossibleEdges)$GroupAffiliations_Combined <- as.character(nodeData$GroupAffiliations_Combined[ix])
+
+V(allPossibleEdges)$VendorMarkets <- as.character(nodeData$VendorMarkets[ix])
+V(allPossibleEdges)$VendorMarkets_Combined <- as.character(nodeData$VendorMarkets_Combined[ix])
+V(allPossibleEdges)$ConsumerMarkets <- as.character(nodeData$ConsumerMarkets[ix])
+V(allPossibleEdges)$ConsumerMarkets_Combined <- as.character(nodeData$ConsumerMarkets_Combined[ix])
+V(allPossibleEdges)$GroupAffiliations <- as.character(nodeData$GroupAffiliations[ix])
+V(allPossibleEdges)$GroupAffiliations_Combined <- as.character(nodeData$GroupAffiliations_Combined[ix])
+V(allPossibleEdges)$SocialMediaChoices <- as.character(nodeData$SocialMediaChoices[ix])
+V(allPossibleEdges)$SocialMediaChoices_Facebook <- as.character(nodeData$SocialMediaChoices_Facebook[ix])
+V(allPossibleEdges)$SocialMediaChoices_Instagram <- as.character(nodeData$SocialMediaChoices_Instagram[ix])
+V(allPossibleEdges)$SocialMediaChoices_LinkedIn <- as.character(nodeData$SocialMediaChoices_LinkedIn[ix])
+V(allPossibleEdges)$SocialMediaChoices_None <- as.character(nodeData$SocialMediaChoices_None[ix])
+V(allPossibleEdges)$SocialMediaChoices_Other <- as.character(nodeData$SocialMediaChoices_Other[ix])
+V(allPossibleEdges)$SocialMediaChoices_Snapchat <- as.character(nodeData$SocialMediaChoices_Snapchat[ix])
+V(allPossibleEdges)$SocialMediaChoices_Tumblr <- as.character(nodeData$SocialMediaChoices_Tumblr[ix])
+V(allPossibleEdges)$SocialMediaChoices_Twitter <- as.character(nodeData$SocialMediaChoices_Twitter[ix])
+V(allPossibleEdges)$SocialMediaChoices_Unknown <- as.character(nodeData$SocialMediaChoices_Unknown[ix])
+V(allPossibleEdges)$SocialMediaChoices_Combined <- as.character(nodeData$SocialMediaChoices_Combined[ix])
+V(allPossibleEdges)$SocialMediaChoices_Combined <- as.character(nodeData$SocialMediaChoices_Combined[ix])
+V(allPossibleEdges)$AnswerSources <- as.character(nodeData$AnswerSources[ix])
+V(allPossibleEdges)$AnswerSources_friendoranacquaintance <- as.character(nodeData$AnswerSources_friendoranacquaintance[ix])
+V(allPossibleEdges)$AnswerSources_Booksmagazines <- as.character(nodeData$AnswerSources_Booksmagazines[ix])
+V(allPossibleEdges)$AnswerSources_Businessortradegroup <- as.character(nodeData$AnswerSources_Businessortradegroup[ix])
+V(allPossibleEdges)$AnswerSources_Callneighbor <- as.character(nodeData$AnswerSources_Callneighbor[ix])
+V(allPossibleEdges)$AnswerSources_Extensionagent <- as.character(nodeData$AnswerSources_Extensionagent[ix])
+V(allPossibleEdges)$AnswerSources_Howtovideos <- as.character(nodeData$AnswerSources_Howtovideos[ix])
+V(allPossibleEdges)$AnswerSources_LibraryLibrarian <- as.character(nodeData$AnswerSources_LibraryLibrarian[ix])
+V(allPossibleEdges)$AnswerSources_Networkingeventorconference <- as.character(nodeData$AnswerSources_Networkingeventorconference[ix])
+V(allPossibleEdges)$AnswerSources_None <- as.character(nodeData$AnswerSources_None[ix])
+V(allPossibleEdges)$AnswerSources_Other <- as.character(nodeData$AnswerSources_Other[ix])
+V(allPossibleEdges)$AnswerSources_Podcasts <- as.character(nodeData$AnswerSources_Podcasts[ix])
+V(allPossibleEdges)$AnswerSources_SearchEngineGoogleBing <- as.character(nodeData$AnswerSources_SearchEngineGoogleBing[ix])
+V(allPossibleEdges)$AnswerSources_Socialmedia <- as.character(nodeData$AnswerSources_Socialmedia[ix])
+V(allPossibleEdges)$AnswerSources_Unknown <- as.character(nodeData$AnswerSources_Unknown[ix])
+V(allPossibleEdges)$AnswerSources_Combined <- as.character(nodeData$AnswerSources_Combined[ix])
+
+
+
+
+
+```
+
+
+
+
+## Creating Sub-Graphs
+Now that we have the graphs with all the connections, we need to create each subgraph to see how they vary.
+
+```{r}
+#get the graph with missing dropped off, but all other edges - this is the unknown network
+unknown <- as.undirected(subgraph.edges(allPossibleEdges, which(E(allPossibleEdges)$weight > 0), delete.vertices = FALSE), mode="collapse", edge.attr.comb = "sum")
+
+#get the graph with all edges greater than 1, this is the coexist network
+coexist <- as.undirected(subgraph.edges(allPossibleEdges, which(E(allPossibleEdges)$weight > 1), delete.vertices = FALSE), mode="collapse", edge.attr.comb = "sum")
+
+#get the graph with all edges greater than 2 this is the communicate network
+communicate <- as.undirected(subgraph.edges(allPossibleEdges, which(E(allPossibleEdges)$weight > 2), delete.vertices = FALSE), mode="collapse", edge.attr.comb = "sum")
+
+#get the graph with all the edges greater than 3 - this is the coordinate network
+coordinate <- as.undirected(subgraph.edges(allPossibleEdges, which(E(allPossibleEdges)$weight > 3), delete.vertices = FALSE), mode="collapse", edge.attr.comb = "sum")
+
+#get the graph with all the edges greater than 4 - this is the collaborate network
+collaborate <- as.undirected(subgraph.edges(allPossibleEdges, which(E(allPossibleEdges)$weight > 4), delete.vertices = FALSE), mode="collapse", edge.attr.comb = "sum")
+
+#get the graph with all the edges greater than 4 - this is the collaborate network, MINUS THE ISOLATES
+collaborateNoIsolates <- as.undirected(subgraph.edges(allPossibleEdges, which(E(allPossibleEdges)$weight > 4), delete.vertices = TRUE), mode="collapse", edge.attr.comb = "sum")
+
+
+
+```
+
+```{r}
+#create a list of the graphs that we've made (like a dictionary)
+graphList <- list(unknown, coexist, communicate, coordinate, collaborate)
+#create a list of their names
+graphListNames <- list('All Possible Connections', 'Co-Exist', 'Communicate',  'Coordinate', 'Collaborate')
+```
+
+
+
+
+## Basic Network Statistics
+
+```{r results="markup"}
+
+#this function returns a dataframe with the basic statistics for a graph
+getBasicStats <- function(g, networkType){
+  #get the density
+  basicStats <- data.frame(networkType, gsize(g), gorder(g), edge_density(g),
+  #get the number of components
+  components(g)$no,
+  #get the size of components
+  components(g)$csize,
+  #get the number of isolates
+  sum(degree(g)==0),
+  #get the diameter (auto uses weights)
+  diameter(g, directed=F),
+  #get the transitivity
+  transitivity(g, type="undirected")
+  )
+  #set the columnams
+  colnames(basicStats) <- c('Network', 'Edges', 'Vertices', 'Density', 'Number of Components', 'Size of Largest Component', 'Number of Isolates', 'Diameter', 'Transitivity')
+  #sort by largest component
+  sorted <- basicStats[order(-basicStats$`Size of Largest Component`),]
+  #return the first row
+  return(sorted[1,]) 
+    
+}
+
+
+#get basic stats for each of our graphs
+for (i in 1:length(graphListNames)){
+  name <- paste("stats", gsub(" ", "_", graphListNames[[i]]), sep="_")
+  assign(name, getBasicStats(graphList[[i]], graphListNames[[i]]))
+  
+}
+
+#combine the basic stats into a single dataframe
+combinedStats = rbind(stats_All_Possible_Connections,`stats_Co-Exist`,stats_Communicate, stats_Coordinate,stats_Collaborate)
+
+
+
+knitr::kable(combinedStats, caption="Basic Description of Each Network")
+
+```
+## Network Centrality Stats
+```{r}
+#this function returns a dataframe with the basic statistics for a graph
+getCentralStats <- function(g, networkType){
+  #get the density
+  basicStats <- data.frame(networkType,
+  #get the degree centralization
+  centr_degree(g, normalized=TRUE)$centralization,
+  #get the betweenness centralizations
+  centr_betw(g, normalized=TRUE)$centralization,
+  #get the closeness centralization
+  centr_clo(g, normalized=TRUE)$centralization
+  )
+  #set the columnams
+  colnames(basicStats) <- c('Network',  'Degree Centralization', 'Betweenness Centralization', 'Closeness Centralization')
+  return(basicStats) 
+    
+}
+
+
+#get basic stats for each of our graphs
+for (i in 1:length(graphListNames)){
+  name <- paste("stats", gsub(" ", "_", graphListNames[[i]]), sep="_")
+  assign(name, getCentralStats(graphList[[i]], graphListNames[[i]]))
+  
+}
+
+#combine the central stats into a single dataframe
+combinedCStats = rbind(stats_All_Possible_Connections,`stats_Co-Exist`,stats_Communicate, stats_Coordinate,stats_Collaborate)
+
+
+
+knitr::kable(combinedCStats, caption="Centrality Statistics for each Network")
+```
+
+
+### Clique Identification
+Typically, cliques are fairly rare. A clique requires all possible connections in a set of nodes to be there. If even one connection is missing, the clique doesn't exist. For example, for a group of 7 nodes, all 21 possible ties must exist between all seven nodes. 
+
+Our co-exist network has a very large clique. Contrary to Pederson's concerns that people don't know each other, it seems as though at least 64 of the 100 people in the network do know each other. Given that there are 104 variations of the 64 person clique which encompasses 77 total people, odds are most people are at least aware of each other.
+
+Our higher-level networks have much smaller cliques, though our communicate network has an incredibly large number of cliques, which encompasses 62 of the members of the network.
+
+The collaborate network has 3 11-member cliques that encompass just 13 people. This could be considered a dense core.
+
+```{r}
+#set up a matrix for storing clique information
+cliqueM <- matrix(, nrow=5, ncol=4)
+
+#get clique Data for each of our graphs
+for (i in 1:length(graphListNames)){
+  #set the name
+  cliqueM[i,1] <- toString(graphListNames[i])
+  #set the size of the max clique
+  cliqueM[i,2] <- clique_num(graphList[[i]])  
+  #set the total max cliques
+  cliqueM[i,3] <- length(largest_cliques(graphList[[i]]))
+  #get the count of individuals in the largest cliques
+  cliqueM[i, 4] <- length(unique(unlist(largest_cliques(graphList[[i]]), recursive=FALSE)))
+  
+}
+
+cliqueDF <- as.data.frame(cliqueM)
+names(cliqueDF) <- c('Network', 'Largest Click Size', 'Total Largest Cliques', 'Unique Individuals in Largest Cliques')
+
+knitr::kable(cliqueDF, caption="Clique Information for Each Network")
+
+```
+Diving into the clique membership of the collaborate network, we can see that each of the 3 cliques has primarily the same membership, with just minor member variation.
+
+```{r}
+#get membership in the largest cliques for the collaborate network
+colabCliques <- largest_cliques(collaborate)
+
+names <- lapply(1:length(colabCliques), function(x) as_ids(colabCliques[[x]]))
+
+uNames <- unique(unlist(names, recursive=FALSE))
+
+#set up a matrix for storing collab clique information
+cliqueColabM <- matrix(, nrow=length(uNames), ncol=4)
+
+for (i in 1:length(uNames)){
+  #set the name
+  cliqueColabM[i,1] <- uNames[i]
+  #in clique 1?
+  cliqueColabM[i, 2] <- uNames[i] %in% names[[1]]
+  #in clique 2?
+  cliqueColabM[i, 3] <- uNames[i] %in% names[[2]]
+  #in clique 3?
+  cliqueColabM[i, 4] <- uNames[i] %in% names[[3]]
+  
+}
+
+cliqueColabDF <- as.data.frame(cliqueColabM)
+names(cliqueColabDF) <- c('Node', 'Clique 1', 'Clique 2', 'Clique 3')
+
+knitr::kable(cliqueColabDF, caption="Collaboration Clique Membership")
+
+```
+
+
+
+### k-Cores
+Instead of relying on cliques, network analysts can use k-Cores to identify sub-groups. A k-Core is a group of nodes in a network where each node is connected to at least k other nodes. We can see how our graphs become progressively more centralized as we move through the Spectrum of Collaboration.
+
+
+```{r}
+#https://jcasasr.wordpress.com/2015/02/03/plotting-the-coreness-of-a-network-with-r-and-igraph/
+CorenessLayout <- function(g) {
+coreness <- graph.coreness(g);
+xy <- array(NA, dim=c(length(coreness), 2));
+ 
+shells <- sort(unique(coreness));
+for(shell in shells) {
+v <- 1 - ((shell-1) / max(shells));
+nodes_in_shell <- sum(coreness==shell);
+angles <- seq(0,360,(360/nodes_in_shell));
+angles <- angles[-length(angles)]; # remove last element
+xy[coreness==shell, 1] <- sin(angles) * v;
+xy[coreness==shell, 2] <- cos(angles) * v;
+}
+return(xy);
+}
+
+
+#get clique Data for each of our graphs
+for (i in 1:length(graphListNames)){
+  #get the coreness of the graph
+  coreness <- graph.coreness(graphList[[i]])
+  print(graphListNames[i])
+  print(table(coreness))
+  colbar <- rainbow(max(coreness));
+  # create layout
+  ll <- CorenessLayout(graphList[[i]]);
+  # plot
+  plot(graphList[[i]], 
+     layout=ll, vertex.size=5, vertex.color=colbar[coreness], 
+     vertex.frame.color=colbar[coreness], main=paste('Coreness of', graphListNames[i]), vertex.label=NA);
+  
+}
+
+
+
+```
+```{r}
+#do some clean up
+rm(cliqueColabDF,cliqueColabM,cliqueDF,cliqueM,colabCliques,combinedCStats,combinedStats,ll,names,net,net3NNMedian,netMean,stats_All_Possible_Connections,`stats_Co-Exist`,stats_Collaborate,stats_Communicate,stats_Coordinate,colbar,coreness,i,ind.NR,ix,name,uNames,actorNonresponseTreatment_kNNMedian,actorNonresponseTreatment_MEAN,CorenessLayout,getCentralStats)
+```
+
+
+
+### Modularity
+Modularity is a measure of the network structure in which there is greater density within a cluster than outside of it. We can look at each node attribute within our network to see which ones show the highest modularity score. The node attribute with the highest modularity score for each network type is below.
+
+```{r}
+
+`%notin%` <- Negate(`%in%`)
+
+#tail(names(vertex_attr(unknown)), n=-20)
+
+getModularity <- function(g){
+  #create a list of all the ways in which we might want to query
+  #queryList = names(vertex_attr(unknown))
+  queryList <- tail(names(vertex_attr(unknown)), n=-3)
+  modMatrix <- as.data.frame(matrix(, nrow=length(queryList), ncol=2) )
+ 
+  for (i in 1:length(queryList)){
+    #add the variable queried
+    modMatrix[i,1] <-  queryList[[i]] 
+    
+    if (queryList[[i]] %notin% c('IncomePercent', 'IntrovertExtrovertScale', 'ID')){
+      
+      mp_num <- as.numeric(factor(vertex_attr(g, queryList[[i]], index=V(g))))
+    } else{
+          mp_num <- as.numeric(cut(vertex_attr(g, queryList[[i]], index=V(g)), breaks=10, labels=c(1,2,3,4,5,6,7,8,9,10)))
+        }
+    
+    modMatrix[i,2] <- modularity(g, mp_num)
+  }
+    
+  return(modMatrix)
+}
+
+
+modularityDF = as.data.frame(matrix(, nrow=length(graphListNames), ncol=3))
+
+length(graphListNames)
+
+#get modularity stats for collaborate graph - all others crash R
+for (i in 5:length(graphListNames)){
+  modularityDF[i,1] <- graphListNames[[i]]
+  thisMod <- getModularity(graphList[[i]])
+  thisMod <- thisMod[order(-thisMod$V2), ]
+  modularityDF[i,2] <- thisMod[1,1]
+  modularityDF[i,3] <- thisMod[1,2]
+  
+}
+
+colnames(modularityDF) <- c('Network', 'Factor', 'Modularity Score')
+kable(modularityDF, caption='Factors with the highest modularity scores by network.')
+
+
+```
+
+
+
+
+### Automated Community Detection
+There are several ways we can do automated community detection using igraph. A weighted, non-directed graph can be tested with edge betweenness, fast-greedy, louvain, and infomap algorithms.
+```{r results="markup"}
+
+communityDetection <- function(g){
+  #I have a weighted, non-directed graph with multiple components
+  c_eb <- cluster_edge_betweenness(g)
+  c_fg <- cluster_fast_greedy(g)
+  c_louv <- cluster_louvain(g)
+  c_infomap <- cluster_infomap(g)
+  #this one won't run and just crashes R eventually
+  #c_optimal <- cluster_optimal(g)
+  
+  #collect some stats about our top manual approach (Area) and these auto approaches
+  methods <- c('Edge Betweenness', 'Fast Greedy', 'Louvain', 'Infomap')
+  method_modularity <- c(modularity(c_eb),modularity(c_fg),modularity(c_louv),modularity(c_infomap) )
+  method_max <- c(max(membership(c_eb)),
+                  max(membership(c_fg)),
+                  max(membership(c_louv)),
+                  max(membership(c_infomap))
+                  )
+  #put it all in a dataframe and review
+  comDetResults <- as.data.frame(rbind(method_modularity,method_max))
+  colnames(comDetResults) <- methods
+  rownames(comDetResults) <- c('Modularity', 'Total Communities')
+  
+
+
+  results = list('c_eb' = c_eb, 'c_fg' = c_fg, 
+                 'c_louv' = c_louv, 'c_infomap' = c_infomap, 
+                 'comDetResults' = comDetResults)
+  return(results)
+}
+
+
+communityDetectionResults <- vector(mode="list")
+
+#get community detection stats for each of our graphs
+for (i in 1:length(graphListNames)){
+  name <- gsub(" ", "_", graphListNames[[i]])
+  communityDetectionResults[[name]] <- communityDetection((graphList[[i]]))
+
+}
+
+
+
+```
+
+
+
+```{r}
+#display community detection results
+
+for (i in 1:length(graphListNames)){
+  name <- gsub(" ", "_", graphListNames[[i]])
+  thisResult = communityDetectionResults[[name]]
+  
+  print(paste('Community Detection Results for ', graphListNames[[i]]))
+  print(kable(round(thisResult$comDetResults, 3), caption=paste("Community Detection Results for ", graphListNames[[i]], " Network")))
+  
+  #we can see how similar these clusterings are numerically as well. (0 = totally different, 1 = completely the same)
+  comm_results <- rbind(
+  compare(thisResult$c_eb, thisResult$c_fg, method="adjusted.rand"),
+  compare(thisResult$c_eb, thisResult$c_louv, method="adjusted.rand"),
+  compare(thisResult$c_eb, thisResult$c_infomap, method="adjusted.rand"),
+  compare(thisResult$c_fg, thisResult$c_louv, method="adjusted.rand"),
+  compare(thisResult$c_fg, thisResult$c_infomap, method="adjusted.rand"),
+  compare(thisResult$c_louv, thisResult$c_infomap, method="adjusted.rand"))
+  
+  row.names(comm_results) <- c('Edge Betweenness vs. Fast Greedy',
+                               'Edge Betweenness vs. Louvain',
+                               'Edge Betweenness vs. Infomap',
+                               'Fast Greedy vs. Louvain',
+                               'Fast Greedy vs. Infomap',
+                               'Louvain vs. Infomap'
+                               )
+  
+  print(kable(comm_results[order(-comm_results[, 1]),], caption = 'Comparison of Communities'))
+  
+
+}
+
+
+ 
+```
+
+
+Each of these ways uses a slightly different algorithm and results in wide-ranging numbers of communities with no particularly high modularity scores. Only in the collaborate network do we see some agreement between algorithms, where both the Fast Greedy and Louvain methods result in a similar number of communities with similar membership and identical modularity scores. In general, what our community detection algorithms are telling us is that are networks do not have strongly articulated sub-communities other than the core-periphery seen via k-cores.
+
+```{r}
+#names(communityDetectionResults)
+thisResult <- communityDetectionResults$Collaborate
+#thisResult
+
+#plot by the louvain clustering - this is just the collaborate_only community
+plot(thisResult$c_louv, collaborate, 
+             label.cex = .25,
+             usearrows = F,
+             vertex.size = rescale(degree(collaborate), 5, 20), #size by degree, rescaled
+             edge.lwd=1.5*E(collaborate)$weight,
+             main="Louvain Communities",
+             vertex.label = NA, #V(collabGraph)$Area,
+             vertex.color = 'black',
+             #layout = as.matrix(coords)
+            )
+
+
+
+```
+
+## Actor Prominence
+Now that we've looked at our network as a whole, and as the parts that make up sub-communities, we also need to look at who are prominent or important actors are. There are multiple ways to determine importance. We'll look at several
+
+### Degree Centrality
+Degree Centrality identifies the actors with the most connections to other people. 
+
+```{r}
+#switch back to statnet
+pacman::p_unload('igraph')
+pacman::p_load('statnet')
+```
+
+```{r}
+allNet <- asNetwork(allPossibleEdges)
+coexistNet <- asNetwork(coexist)
+communicateNet <- asNetwork(communicate)
+coordinateNet <- asNetwork(coordinate)
+collaborateNet <- asNetwork(collaborate)
+collaborateNoIsolatesNet <- asNetwork(collaborateNoIsolates)
+
+```
+
+```{r}
+#function to display the prominent actors by centrality measures
+displayProminentActors <- function(network, measure, type, netName){
+  #get transparent light colors for everyone but the prominent nodes
+  colorT  <- addalpha('#1B9E77', .1)
+  colorH <- addalpha('red3', .5)
+  borderT <- addalpha('#778899', .5)
+  borderH <- addalpha('#000000', .3)
+  allColors <- rep(colorT, length(measure) )
+  
+  #get the rescaled value
+  rescaledMeasure <- rescale(measure, 1, 5)
+  
+  #allColors[which(measure > cutoff)] <- colorH
+  allColors[which(rescaledMeasure == 5)] <- colorH
+  
+  allBorders <- rep(borderT, length(measure))
+  #allBorders[which(measure> cutoff)] <- borderH
+  allBorders[which(rescaledMeasure == 5)] <- borderH
+  
+  
+  #get blank names for everyone but the prominent node
+  centralNames <- get.vertex.attribute(network, 'Name')#network.vertex.names(network)
+  #centralNames[which(measure <= cutoff)] <-  NA
+  centralNames[which(rescaledMeasure < 5)] <- NA
+
+  
+  gplot(network, # our network object
+       vertex.col=allColors, # color nodes by institute
+       label.cex = .75,
+       label = centralNames,
+       label.pos = 2,
+       usearrows = F,
+       vertex.cex = rescaledMeasure, #size by type, rescaled
+       #edge.lwd=cnet %e% "weight",
+       main=paste("Prominent Nodes by", type,  "Centrality for", netName),
+       edge.col = addalpha('#D3D3D3', .5),
+       vertex.border = allBorders
+       #coord = coords
+       )
+  
+}
+```
+
+
+
+```{r}
+displayProminentActors(coexistNet, degree(coexistNet, gmode="graph"), 'Degree', 'Co-Exist')
+displayProminentActors(communicateNet, degree(communicateNet, gmode="graph"), 'Degree', 'Communicate')
+displayProminentActors(coordinateNet, degree(coordinateNet, gmode="graph"), 'Degree', 'Coordinate')
+displayProminentActors(collaborateNet, degree(collaborateNet, gmode="graph"), 'Degree', 'Collaborate')
+
+```
+
+### Eigenvector Centrality
+Eigenvector centrality is similar to how Google ranks pages. Nodes that are connected to ther important nodes have the highest eigenvector centrality scores. Here we see that when considering eigenvector centrality, we have fewer important nodes.
+
+```{r}
+
+displayProminentActors(coexistNet, evcent(coexistNet, gmode="graph"), 'Eigenvector', 'Co-Exist')
+displayProminentActors(communicateNet, evcent(communicateNet, gmode="graph"), 'Eigenvector', 'Communicate')
+displayProminentActors(coordinateNet, evcent(coordinateNet, gmode="graph"), 'Eigenvector', 'Coordinate')
+displayProminentActors(collaborateNet, evcent(collaborateNet, gmode="graph"), 'Eigenvector', 'Collaborate')
+
+
+```
+
+###Betweenness Centrality
+With betweenness centrality, we are most interested in the people that sit "between" parts of our network. These are the people that are key for information flow. Without these people, we would have a harder time disseminating information. You can see that we have one different person that shows up when we look at importance by betweenness.
+
+```{r}
+
+displayProminentActors(coexistNet, betweenness(coexistNet, gmode="graph", cmode="undirected", ignore.eval=FALSE), 'Betweenness', 'Co-Exist')
+displayProminentActors(communicateNet, betweenness(communicateNet, gmode="graph", cmode="undirected", ignore.eval=FALSE), 'Betweenness', 'Communicate')
+displayProminentActors(coordinateNet, betweenness(coordinateNet, gmode="graph", cmode="undirected", ignore.eval=FALSE), 'Betweenness', 'Coordinate')
+displayProminentActors(collaborateNet, betweenness(collaborateNet, gmode="graph", cmode="undirected", ignore.eval=FALSE), 'Betweenness', 'Collaborate')
+
+
+```
+
+### Closeness Centrality
+Closeness doesn't compute when there are isolates, so for this feature, we'll drop the isolates
+
+```{r}
+displayProminentActors(coexistNet, closeness(coexistNet, gmode="graph", cmode="undirected"), 'Closeness', 'Co-Exist')
+displayProminentActors(communicateNet, closeness(communicateNet, gmode="graph", cmode="undirected"), 'Closeness', 'Communicate')
+displayProminentActors(coordinateNet, closeness(coordinateNet, gmode="graph", cmode="undirected"), 'Closeness', 'Coordinate')
+displayProminentActors(collaborateNoIsolatesNet, closeness(collaborateNoIsolatesNet, gmode="graph", cmode="undirected"), 'Closeness', 'Collaborate (Isolates Dropped)')
+
+```
+
+
+
+### CutPoints
+Finally, we can look at cutpoints. A cutpoint is a node that would increase the number of components in the network if it were dropped. Therefore, cut points can be important nodes in the network, because if they were dropped, there would be a disconnect between two parts of the network. If we look at the cutpoints in our network, we can see that different important nodes are highlighted, compared to our other measures of centrality or importance.
+
+
+```{r}
+
+
+displayCutPoints <- function(network, title){
+  cpnet <- cutpoints(network, mode="graph", return.indicator=T)
+  names <- network.vertex.names(network)
+  
+  if(length(names[which(cpnet == TRUE)]) > 0) {
+  #print the names
+  #print(paste("CutPoint individuals in the ", title, "network"))
+  #print(names[which(cpnet == TRUE)])
+  
+  #get blank names for everyone but the prominent node
+  centralNames <- get.vertex.attribute(network, 'Name')#network.vertex.names(network)
+  centralNames[which(cpnet == FALSE)] <- NA
+  #print(centralNames)
+  
+  #get transparent light colors for everyone but the cutpoint nodes
+  colorT  <- addalpha('#1B9E77', .1)
+  colorH <- addalpha('red3', .5)
+  borderT <- addalpha('#778899', .5)
+  borderH <- addalpha('#000000', .3)
+  allColors <- rep(colorT, length(names) )
+  allColors[which(cpnet == TRUE)] <- colorH
+  allBorders <- rep(borderT, length(names))
+  allBorders[which(cpnet == TRUE)] <- borderH
+
+  gplot(network,
+      gmode="graph",
+      vertex.col=allColors,
+      vertex.border=allBorders,
+      #coord=coords,
+      vertex.cex = 1.5,
+      jitter=TRUE,
+      label = centralNames,
+      edge.col = addalpha('#D3D3D3', .5),
+      main=paste("CutPoints for ", title, "Network")
+      )
+  }
+  else{
+    print(paste(title, 'has no cutpoints.'))
+  }
+}
+
+displayCutPoints(coexistNet, 'Co-Exist')
+displayCutPoints(communicateNet, 'Communicate')
+displayCutPoints(coordinateNet, 'Coordinate')
+displayCutPoints(collaborateNoIsolatesNet, 'Collaborate (Isolates Dropped)')
+
+```
+
+What can we learn from these measures of importance? In this instance, we could speak to the people that are identified as important nodes and find out from them how they see themselves in this collaborative network. These are people that we can target to improve collaborations in other parts of the network that are currently less connected, perhaps.
+
+
+
+
+##Modeling
+##Models of Network Structure and Formation
+Network models are simplified representations of networks. We can use models as comparisons for our observed network. We can learn how much our observed network follows 3 different model types: random models, small world models and scale-free models. Real world models usually most closely align with scale-free models. These are models that tend to have a few very highly connected nodes, with gradually trailing off connections. We'll create models that match the size and approximate the density of our network, so that we can compare it to these random models.
+
+
+```{r}
+#switch back to igraph
+pacman::p_unload('statnet')
+pacman::p_load('igraph')
+#citation('ergm')
+
+```
+
+```{r}
+#show our models in comparison with generated models
+
+
+getComparisonModel <- function(g, type){
+  set.seed(1)
+  size = gorder(g)
+  edgeCount = gsize(g)
+  gdensity = edge_density(g)
+  
+  if(type == 'Random'){
+    cModel <- erdos.renyi.game(n=size, gdensity, type="gnp")
+  }else if(type=='Small World'){
+    cModel <- simplify(watts.strogatz.game(dim=1, size=size, nei=4, p=gdensity))
+  }else if(type=='Scale Free'){
+    cModel <- barabasi.game(size, directed=F, out.dist = degree.distribution(g))
+  }
+  else{
+    cModel <-  g
+  }
+  
+  #nodes over 14 could be considered hubs
+  V(cModel)$color <- rep("lightblue", size)
+  V(cModel)$color[which(rescale(degree(cModel), 3, 7)== 7)] <- "red"
+  plot(cModel, vertex.label=NA, vertex.size=rescale(degree(cModel), 3, 7), main=paste(size, 'Node', type, 'Model'))
+  
+  return(cModel)
+}
+
+
+
+
+
+for (i in 2:length(graphListNames)){
+  op <- par(mfrow=c(2,2))
+  cRandom <- getComparisonModel(graphList[[i]], 'Random')
+  cSmallWorld <- getComparisonModel(graphList[[i]], 'Small World')
+  cScaleFree <- getComparisonModel(graphList[[i]], 'Scale Free')
+  cOriginal <- getComparisonModel(graphList[[i]], paste('Observed', graphListNames[i], 'Network'))
+  
+  par(op)
+  
+  ### Get statistics for each and compare to our model
+  #get the density of each
+  dens <- c(graph.density(cRandom), graph.density(cSmallWorld), graph.density(cScaleFree),graph.density(cOriginal))
+  dens
+  #get the average degrees of each
+  avdeg <- c(mean(degree(cRandom)), mean(degree(cSmallWorld)), mean(degree(cScaleFree)),mean(degree(cOriginal)))
+  #get the transitivity of each
+  trans <- c(transitivity(cRandom), transitivity(cSmallWorld), transitivity(cScaleFree),transitivity(cOriginal))
+  #get the isolates
+  iso <- c(sum(degree(cRandom)==0), sum(degree(cSmallWorld)==0), sum(degree(cScaleFree)==0),sum(degree(cOriginal)==0))
+  df <- cbind(dens, avdeg, trans, iso)
+  rownames(df) <- c('Erdos-Reny (Random)', 'Small World', 'Scale-Free (Preferential Attachment)',paste('Observed', graphListNames[i], 'Network'))
+  print(kable(df, caption='Statistical Comparison'))
+  
+  # Plot Degree Distributions for each
+  op <- par(mfrow=c(2,2))
+  plot(degree.distribution(cRandom),xlab="Degree",ylab=NA,type="b",
+       main="Erdos-Renyi Random Graph")
+  plot(degree.distribution(cSmallWorld),xlab="Degree",ylab=NA,type="b",
+       main="Small World")
+  plot(degree.distribution(cScaleFree),xlab="Degree",ylab=NA,type="b",
+       main="Scale-Free (Preferential Attachment)")
+  plot(degree.distribution(cOriginal),xlab="Degree",ylab=NA,type="b",
+       main=paste('Observed', graphListNames[i], 'Network'))
+  par(op)
+  
+  
+}
+
+
+
+
+```
+
+
+Our model seems to have a degree distribution most like a scale-free network. (However, this may be misleading because the degree distribution was passed in to the scale free network as a starting point.) 
+
+### Statistical Network Models
+
+ERGM (exponential random graph models) can be used to build and test hypotheses about networks. ERGMs can help us test hypotheses about both nodes and the overall network, such as diameter or degree distribution.
+
+We will use ERGM to focus on predicting the likelihood of 2 actors forming a collaborative relationship based on various data we have about them.
+
+#### Initial Survey Non-Respondents
+
+In our network, we have a group of actors who did not complete the initial survey. This limits the types of factors we can use in our modeling. The following graphs show the degree importance of the actors for whom we are missing node data. 
+
+```{r}
+#switch back to statnet and load ergm
+pacman::p_unload('igraph')
+pacman::p_load('statnet')
+```
+
+```{r}
+
+showERGMFlag <- function(network, measure, type, netName){
+  #get transparent light colors for everyone but the prominent nodes
+  colorT  <- addalpha('#1B9E77', .1)
+  colorH <- addalpha('red3', .5)
+  borderT <- addalpha('#778899', .5)
+  borderH <- addalpha('#000000', .3)
+  allColors <- rep(colorT, length(measure) )
+    
+  #get the rescaled value
+  rescaledMeasure <- rescale(measure, 1, 5)
+    
+  #allColors[which(measure > cutoff)] <- colorH
+  allColors[which(get.vertex.attribute(network, 'ERGMFlag') == "False")] <- colorH
+    
+  allBorders <- rep(borderT, length(measure))
+  #allBorders[which(measure> cutoff)] <- borderH
+  allBorders[which(get.vertex.attribute(network, 'ERGMFlag') == "False")] <- borderH
+    
+    
+  #get blank names for everyone but the prominent node
+  centralNames <- get.vertex.attribute(network, 'Name')#network.vertex.names(network)
+  #centralNames[which(measure <= cutoff)] <-  NA
+  centralNames[which(rescaledMeasure < 6)] <- NA
+
+  
+  gplot(network, # our network object
+       vertex.col=allColors, # color nodes by institute
+       label.cex = .75,
+       #label = centralNames,
+       label.pos = 2,
+       usearrows = F,
+       vertex.cex = rescaledMeasure, #size by type, rescaled
+       #edge.lwd=cnet %e% "weight",
+       main=paste("Survey Non-Respondents sized by ", type,  "Centrality for", netName),
+       edge.col = addalpha('#D3D3D3', .5),
+       vertex.border = allBorders
+       #coord = coords
+       )
+  
+}
+
+#get.vertex.attribute(coexistNet, 'ERGMFlag')
+
+showERGMFlag(coexistNet, degree(coexistNet, gmode="graph"), 'Degree', 'Co-Exist')
+showERGMFlag(communicateNet, degree(communicateNet, gmode="graph"), 'Degree', 'Communicate')
+showERGMFlag(coordinateNet, degree(coordinateNet, gmode="graph"), 'Degree', 'Coordinate')
+showERGMFlag(collaborateNet, degree(collaborateNet, gmode="graph"), 'Degree', 'Collaborate')
+
+```
+
+while it's fairly clear that in our collaborate network, these actors do not tend to be central, they could still skew our overall modeling results. To compensate, we'll do two series of models - one in which they are included and one in which they are not. For the model in which they are included, we will only use factors for which we have data. For instance, we can use any of the ERGM factors based on edges. Pederson also provided role data for each of these actors, so we can use that information as well. We cannot use many of our other node attributes.
+
+First, let's quickly review what the network looks like without the non-responders.
+
+```{r}
+#switch back to igraph
+pacman::p_unload('statnet')
+pacman::p_load('igraph')
+
+
+```
+```{r}
+
+#get the names with the ERGMFlag
+toRemove <- V(collaborate)$name[which(V(collaborate)$ERGMFlag == 'False')]
+
+
+#remove the nodes from a copy of collaborate network
+collaborateComplete <- delete_vertices(collaborate, toRemove)
+getBasicStats(collaborateComplete, 'Collaborate Network With Non-Responders Removed')
+
+
+```
+
+
+
+```{r}
+#switch back to statnet and load ergm
+pacman::p_unload('igraph')
+pacman::p_load('statnet', 'ergm')
+
+collaborateCompleteNet <- asNetwork(collaborateComplete)
+displayProminentActors(collaborateCompleteNet, degree(collaborateCompleteNet, gmode="graph"), 'Degree', 'Non-Responders Removed')
+```
+
+Let's start with the non-responders removed network.
+
+```{r}
+modelNames <- c('mod0')
+modelDescriptions <- c('NULL')
+modelAIC <- c(1764)
+
+#start with a null model
+mod0 <- ergm(collaborateCompleteNet ~ edges, 
+             control=control.ergm(seed=40)) #this just gives consistent results
+
+summary(mod0)
+#confirm that the edge node matches our graph density
+plogis(coef(mod0))
+
+
+```
+In this network, we have 2 numerical node attributes. We can look for linear relationships between these attributes and the degree of the actor.
+
+```{r}
+
+op <- par(mfrow=c(1,2))
+#check out some potential main effects of nodes
+scatter.smooth(collaborateCompleteNet %v% 'IncomePercent',
+degree(collaborateCompleteNet,gmode='graph'),
+xlab='Percent Income From Self-Employement',
+ylab='Degree')
+
+scatter.smooth(collaborateCompleteNet %v% 'IntrovertExtrovertScale',
+degree(collaborateCompleteNet,gmode='graph'),
+xlab='Introvert-Extrovert Scale',
+ylab='Degree')
+
+
+par(op)
+
+
+```
+
+Neither of these numerical nodes really look all that related to number of degrees. But, we can test it by creating a model using the nodecov approach.
+
+```{r}
+mod1 <- ergm(collaborateCompleteNet ~ edges +
+             nodecov('IncomePercent') +
+             nodecov('IntrovertExtrovertScale'),
+             control=control.ergm(seed=40))
+summary(mod1)
+modelNames <- c(modelNames, 'mod1')
+modelDescriptions <- c(modelDescriptions, 'IncomePercent & I-E Scale')
+modelAIC <- c(modelAIC, AIC(mod1))
+
+
+```
+
+Both Income Percent and Introvert/Extrovert scale are positively and significantly related to the likelihood of observing a tie between 2 nodes. Let's also add in whether or not someone is self-employed or has a second job.
+
+
+```{r}
+mod2 <- ergm(collaborateCompleteNet ~ edges +
+             nodecov('IncomePercent')  +
+             nodecov('IntrovertExtrovertScale') +
+               nodefactor('SelfEmployed') +
+               nodefactor('HasSecondJob'),
+             control=control.ergm(seed=40))
+summary(mod2)
+```
+
+```{r}
+modelNames <- c(modelNames, 'mod2')
+modelDescriptions <- c(modelDescriptions, '+Selfemployed & second job')
+modelAIC <- c(modelAIC, AIC(mod2))
+
+```
+
+Adding in the self employed and second job status variables make the introvertextrovert scale no longer significant. We can remove that variable from our model. Self-employment status is also not significant. We'll remove that one as well.
+
+Let's look at the location.
+
+```{r}
+mod3 <- ergm(collaborateCompleteNet ~ edges +
+             nodecov('IncomePercent')  +
+             nodefactor('Location', levels=c("Town of Barksdale", "Town of Clover", "Town of Eileen", 
+                                             "Town of Kelly", "Town of La Pointe", "Town of Pilsen",
+                                             "Town of Port Wing","Town of Washburn", "Town of White River", "Village of Mason")) + 
+               nodefactor('HasSecondJob'),
+             control=control.ergm(seed=40))
+summary(mod3)
+```
+
+```{r}
+modelNames <- c(modelNames, 'mod3')
+modelDescriptions <- c(modelDescriptions, 'node factor location')
+modelAIC <- c(modelAIC, AIC(mod3))
+
+```
+
+
+While many of the locations have significance, there are a couple of other ways we can treat location. One is homophily - seeing if having a matching location contributes to collaboration. Let's look at that, differentiated by location. (Note this model was initially run with all locations, and infinite coefficients were removed.)
+
+```{r}
+mod4 <- ergm(collaborateCompleteNet ~ edges +
+             nodecov('IncomePercent')  +
+             nodematch('Location', diff=T, levels=c('Town of La Pointe', 'Town of Russell',  'Town of Washburn')) + 
+               nodefactor('HasSecondJob'),
+             control=control.ergm(seed=40))
+summary(mod4)
+
+
+```
+```{r}
+
+modelNames <- c(modelNames, 'mod4')
+modelDescriptions <- c(modelDescriptions, 'Node match diffentiated location')
+modelAIC <- c(modelAIC, AIC(mod4))
+
+```
+
+Living in the same location is positively and significantly related to the formation of the network for certain locations. However, the AIC is higher for this model than for the previous model.
+
+We can also look at homophily not differentiated by location - in other words, two people living in the same place, no matter which place. Again, this was originally run with all locations, but some produced infinite coefficients. Only those with significant, non-infinite coefficients were kept.
+
+```{r}
+mod5 <- ergm(collaborateCompleteNet ~ edges +
+             nodecov('IncomePercent')  +
+             nodematch('Location', diff=F, levels=c('Town of La Pointe', 'Town of Russell',  'Town of Washburn')) + 
+               nodefactor('HasSecondJob'),
+             control=control.ergm(seed=40))
+summary(mod5)
+```
+
+
+```{r}
+modelNames <- c(modelNames, 'mod5')
+modelDescriptions <- c(modelDescriptions, 'Non-differentiated Locations')
+modelAIC <- c(modelAIC, AIC(mod5))
+#review AIC
+rm(aicDF)
+aicDF <- data.frame(modelNames, modelDescriptions, modelAIC)
+aicDF[order(modelAIC), ]
+```
+
+Neither of the location match approaches results in a better model. We'll continue with the nodefactor(location) model.
+
+
+Pederson was interested in some factors that indicate if a person is more or less focused towards collectivism or individualism. Let's add those to the model.
+
+```{r}
+
+mod6 <- ergm(collaborateCompleteNet ~ edges +
+             nodecov('IncomePercent')  +
+             nodefactor('Location', levels=c("Town of Clover", "Town of Pilsen", "Town of Port Wing","Town of Washburn", "Town of White River", "Village of Mason")) +
+               nodefactor('HasSecondJob') + 
+             nodefactor('PersonalSelfDependence', levels=c("Strongly Agree", "Strongly Disagree", "Unknown")) +
+               nodefactor('WorkSelfDependence', levels=c("Strongly Disagree", "Disagree")) +
+               nodefactor('CollaborativeEconomicAdvantage', levels=c("Neutral", "Strongly Agree", "Strongly Disagree")) + 
+               nodefactor('CollaborationsNotWorthIt', levels=c("Disagree")),
+             control=control.ergm(seed=40))
+summary(mod6)
+
+```
+
+```{r}
+modelNames <- c(modelNames, 'mod6')
+modelDescriptions <- c(modelDescriptions, 'Collectivism/Indivdualism')
+modelAIC <- c(modelAIC, AIC(mod6))
+#review AIC
+rm(aicDF)
+aicDF <- data.frame(modelNames, modelDescriptions, modelAIC)
+aicDF[order(modelAIC), ]
+
+```
+
+Adding this variable made some of the location variables no longer significant. After removing those, this model becomes our best model so far. 
+There's a positive significant relationship between individuals believing that collaboration has an economic advantage and their tendency to form collaborative ties. 
+
+
+
+Let's take a look at roles. We have a variety of roles we can look at individually or we can look to see if the combination of roles someone plays is significant.
+
+Roles_Combined is a bitstring indicating if a person has or doesn't have each of the roles. Including it does not lead to significant results or a usable model. 
+
+But we can also look at roles individually. 
+
+Some of the individual roles are significantly correlated.
+
+```{r}
+
+mod7 <- ergm(collaborateCompleteNet ~ edges +
+             nodecov('IncomePercent')  +
+             nodefactor('Location', levels=c("Town of Clover", "Town of Port Wing","Town of Washburn", "Town of White River")) +
+             nodefactor('PersonalSelfDependence', levels=c("Strongly Agree",  "Unknown")) +
+               nodefactor('CollaborativeEconomicAdvantage', levels=c("Neutral", "Strongly Agree", "Strongly Disagree")) + 
+               nodefactor('CollaborationsNotWorthIt', levels=c("Disagree"))+
+               #roles
+               nodefactor('Roles_FoodSystemsEducator') +
+               nodefactor('Roles_NoneofThese') +
+               nodefactor('Roles_Other') 
+               
+               ,
+             control=control.ergm(seed=40))
+
+
+summary(mod7)
+```
+While only a few of the roles are significant, they are significant enough to have made several other variables insignificant. Removing those results in our best model yet.
+
+```{r}
+modelNames <- c(modelNames, 'mod7')
+modelDescriptions <- c(modelDescriptions, 'Significant Roles')
+modelAIC <- c(modelAIC, AIC(mod7))
+#review AIC
+rm(aicDF)
+aicDF <- data.frame(modelNames, modelDescriptions, modelAIC)
+aicDF[order(modelAIC), ]
+
+```
+
+We can also see if roles matter when both people hold the same role (or both people don't hold the same role).
+
+```{r}
+mod8 <- ergm(collaborateCompleteNet ~ edges +
+             nodecov('IncomePercent')  +
+             nodefactor('Location', levels=c("Town of Clover", "Town of Port Wing","Town of Washburn", "Town of White River")) +
+             nodefactor('PersonalSelfDependence', levels=c("Strongly Agree",  "Unknown")) +
+               nodefactor('CollaborativeEconomicAdvantage', levels=c("Neutral", "Strongly Agree", "Strongly Disagree")) + 
+               nodefactor('CollaborationsNotWorthIt', levels=c("Disagree"))+
+               #roles
+               nodefactor('Roles_FoodSystemsEducator') +
+               nodefactor('Roles_NoneofThese') +
+               nodefactor('Roles_Other') +
+             
+               #roles matching
+              nodematch('Roles_FoodSystemsEducator') 
+
+               
+               ,
+             control=control.ergm(seed=40))
+summary(mod8)
+
+
+```
+The only role where matching is significant is food systems educators.
+
+
+```{r}
+modelNames <- c(modelNames, 'mod8')
+modelDescriptions <- c(modelDescriptions, 'Matching Roles')
+modelAIC <- c(modelAIC, AIC(mod8))
+#review AIC
+rm(aicDF)
+aicDF <- data.frame(modelNames, modelDescriptions, modelAIC)
+aicDF[order(modelAIC), ]
+
+```
+Alternatively, we can look at differentiated role matching - again the only role with significance is food systems educator. This model does not improve on our AIC, but it does tell us that the node match for food system educator is only significant for 2 nodes that are both NOT food systems educators.
+```{r}
+mod9 <- ergm(collaborateCompleteNet ~ edges +
+              nodecov('IncomePercent')  +
+             nodefactor('Location', levels=c("Town of Clover", "Town of Port Wing","Town of Washburn", "Town of White River")) +
+             nodefactor('PersonalSelfDependence', levels=c("Strongly Agree",  "Unknown")) +
+               nodefactor('CollaborativeEconomicAdvantage', levels=c("Neutral", "Strongly Agree", "Strongly Disagree")) + 
+               nodefactor('CollaborationsNotWorthIt', levels=c("Disagree"))+
+               #roles
+               nodefactor('Roles_FoodSystemsEducator') +
+               nodefactor('Roles_NoneofThese') +
+               nodefactor('Roles_Other') +
+             
+               #roles matching
+              nodematch('Roles_FoodSystemsEducator', diff=T) 
+ 
+
+               
+               ,
+             control=control.ergm(seed=40))
+summary(mod9)
+
+```
+
+```{r}
+
+modelNames <- c(modelNames, 'mod9')
+modelDescriptions <- c(modelDescriptions, 'Differentiated Matching Roles')
+modelAIC <- c(modelAIC, AIC(mod9))
+
+#review AIC
+rm(aicDF)
+aicDF <- data.frame(modelNames, modelDescriptions, modelAIC)
+
+aicDF[order(modelAIC), ]
+
+```
+
+
+We can also look at markets people vend at or buy at. First we'll just look at association with the market as a predictive factor. Then we'll look at matching with other actors at the market as a factor.
+
+```{r}
+mod10 <- ergm(collaborateCompleteNet ~ edges +
+             nodecov('IncomePercent')  +
+             nodefactor('Location', levels=c("Town of Clover", "Town of Port Wing","Town of Washburn", "Town of White River")) +
+             nodefactor('PersonalSelfDependence', levels=c("Strongly Agree",  "Unknown")) +
+               nodefactor('CollaborativeEconomicAdvantage', levels=c("Neutral", "Strongly Agree", "Strongly Disagree")) + 
+               nodefactor('CollaborationsNotWorthIt', levels=c("Disagree"))+
+               #roles
+               nodefactor('Roles_FoodSystemsEducator') +
+               nodefactor('Roles_Other') +
+             
+               #roles matching
+              nodematch('Roles_FoodSystemsEducator') +
+               #markets
+
+              nodefactor('VendorMarkets_Bayfield') +
+              nodefactor('VendorMarkets_DuluthSuperior') +
+              nodefactor('VendorMarkets_Unknown') +
+
+
+              nodefactor('ConsumerMarkets_Cornucopia') +
+              nodefactor('ConsumerMarkets_Washburn') 
+               
+               ,
+             control=control.ergm(seed=40))
+
+summary(mod10)
+
+```
+Adding association with farmer's markets improved our model. Only some markets were signficant, however. For vending, markets with significance are Bayfield and Duluth/Superior and 'Unknown' which is somewhat equivalent to "not a vendor." For consuming, markets with significance are Cornucopia and Washburn. 
+
+We can also check to see if matching at a market is important.
+
+
+```{r}
+modelNames <- c(modelNames, 'mod10')
+modelDescriptions <- c(modelDescriptions, 'Associations With Markets')
+modelAIC <- c(modelAIC, AIC(mod10))
+
+#review AIC
+rm(aicDF)
+aicDF <- data.frame(modelNames, modelDescriptions, modelAIC)
+
+aicDF[order(modelAIC), ]
+
+```
+
+
+
+
+```{r}
+mod11 <- ergm(collaborateCompleteNet ~ edges +
+             nodecov('IncomePercent')  +
+             nodefactor('Location', levels=c("Town of Clover", "Town of Port Wing","Town of Washburn", "Town of White River")) +
+             nodefactor('PersonalSelfDependence', levels=c("Strongly Agree",  "Unknown")) +
+               nodefactor('CollaborativeEconomicAdvantage', levels=c("Neutral", "Strongly Agree", "Strongly Disagree")) + 
+               nodefactor('CollaborationsNotWorthIt', levels=c("Disagree"))+
+               #roles
+               nodefactor('Roles_FoodSystemsEducator') +
+               nodefactor('Roles_Other') +
+             
+               #roles matching
+              nodematch('Roles_FoodSystemsEducator') +
+               #markets
+              nodefactor('VendorMarkets_Bayfield') +
+              nodefactor('VendorMarkets_DuluthSuperior') +
+              nodefactor('VendorMarkets_Unknown') +
+              nodefactor('ConsumerMarkets_Cornucopia') +
+              nodefactor('ConsumerMarkets_Washburn') +
+             
+
+             #matching markets
+              nodematch('ConsumerMarkets_MadelineIsland')
+             
+               
+               ,
+             control=control.ergm(seed=40))
+summary(mod11)
+
+
+```
+
+```{r}
+modelNames <- c(modelNames, 'mod11')
+modelDescriptions <- c(modelDescriptions, 'Matched Markets')
+modelAIC <- c(modelAIC, AIC(mod11))
+
+#review AIC
+rm(aicDF)
+aicDF <- data.frame(modelNames, modelDescriptions, modelAIC)
+
+aicDF[order(modelAIC), ]
+
+```
+
+Matching with a market did not improve our model.
+
+In addition to affiliation with farmer's markets, we also asked about affiliation with some specific named organizations in the region. First let's see if affiliation with the organizations is meaningful to the network.
+
+```{r}
+mod12 <- ergm(collaborateCompleteNet ~ edges +
+             nodecov('IncomePercent')  +
+             nodefactor('Location', levels=c("Town of Clover", "Town of Washburn", "Town of White River")) +
+             nodefactor('PersonalSelfDependence', levels=c( "Unknown")) +
+               nodefactor('CollaborativeEconomicAdvantage', levels=c("Strongly Agree", "Strongly Disagree")) + 
+               nodefactor('CollaborationsNotWorthIt', levels=c("Disagree"))+
+               #roles
+               nodefactor('Roles_FoodSystemsEducator') +
+               nodefactor('Roles_Other') +
+             
+               #roles matching
+              nodematch('Roles_FoodSystemsEducator') +
+               #markets
+              nodefactor('VendorMarkets_DuluthSuperior') +
+              nodefactor('VendorMarkets_Unknown') +
+
+             
+             #group affiliation
+             nodefactor('GroupAffiliations_BayfieldFoods') +
+             nodefactor('GroupAffiliations_NorthlandCollegeprograms') +
+             nodefactor('GroupAffiliations_ReCliffCommunityFarm') +
+             nodefactor('GroupAffiliations_UWExtensionFarmilyorBootlakersGuild') 
+
+             
+               
+               ,
+             control=control.ergm(seed=40))
+summary(mod12)
+
+
+```
+
+After removing the insignificant group affiliations, we're left with 4 groups that have a significant effect on the network - 5 of which have a positive effect and one of which has a negative effect. Once again we have improved on our model. Note that several other variables dropped off as well.
+
+```{r}
+
+modelNames <- c(modelNames, 'mod12')
+modelDescriptions <- c(modelDescriptions, 'Group Affiliations')
+modelAIC <- c(modelAIC, AIC(mod12))
+
+#review AIC
+rm(aicDF)
+aicDF <- data.frame(modelNames, modelDescriptions, modelAIC)
+
+aicDF[order(modelAIC), ]
+
+```
+
+Next we can look at if matching as either being or not being affiliate with a group is significant.
+
+```{r}
+mod13 <- ergm(collaborateCompleteNet ~ edges +
+            nodecov('IncomePercent')  +
+             nodefactor('Location', levels=c("Town of Clover", "Town of Washburn", "Town of White River")) +
+             nodefactor('PersonalSelfDependence', levels=c( "Unknown")) +
+               nodefactor('CollaborativeEconomicAdvantage', levels=c("Strongly Agree", "Strongly Disagree")) + 
+               nodefactor('CollaborationsNotWorthIt', levels=c("Disagree"))+
+               #roles
+               nodefactor('Roles_FoodSystemsEducator') +
+               nodefactor('Roles_Other') +
+             
+               #roles matching
+              nodematch('Roles_FoodSystemsEducator') +
+               #markets
+              nodefactor('VendorMarkets_DuluthSuperior') +
+              nodefactor('VendorMarkets_Unknown') +
+
+             
+             #group affiliation
+             nodefactor('GroupAffiliations_BayfieldFoods') +
+             nodefactor('GroupAffiliations_NorthlandCollegeprograms') +
+             nodefactor('GroupAffiliations_ReCliffCommunityFarm') +
+             nodefactor('GroupAffiliations_UWExtensionFarmilyorBootlakersGuild') +
+             
+             #matching group affiliation
+             nodematch('GroupAffiliations_BadRiverFoodSovereignty') +
+             nodematch('GroupAffiliations_BayfieldFoods') +
+             nodematch('GroupAffiliations_FarmToSchool') +
+             nodematch('GroupAffiliations_InHerBoots', diff=T) 
+
+             
+               
+               ,
+             control=control.ergm(seed=40))
+summary(mod13)
+
+```
+
+```{r}
+modelNames <- c(modelNames, 'mod13')
+modelDescriptions <- c(modelDescriptions, 'Matched Group Affiliations')
+modelAIC <- c(modelAIC, AIC(mod13))
+
+#review AIC
+rm(aicDF)
+aicDF <- data.frame(modelNames, modelDescriptions, modelAIC)
+
+aicDF[order(modelAIC), ]
+
+```
+
+There are only a few group affiliations where either a differentiated or undifferentiated match is significant, but adding this in again improved our model.
+
+Next we can look at social media choices.
+
+```{r}
+mod14 <- ergm(collaborateCompleteNet ~ edges +
+             nodecov('IncomePercent')  +
+             nodefactor('Location', levels=c("Town of Clover", "Town of Washburn", "Town of White River")) +
+             nodefactor('PersonalSelfDependence', levels=c( "Unknown")) +
+               nodefactor('CollaborativeEconomicAdvantage', levels=c("Strongly Agree", "Strongly Disagree")) + 
+               nodefactor('CollaborationsNotWorthIt', levels=c("Disagree"))+
+               #roles
+               nodefactor('Roles_FoodSystemsEducator') +
+               nodefactor('Roles_Other') +
+             
+               #roles matching
+              nodematch('Roles_FoodSystemsEducator') +
+               #markets
+              nodefactor('VendorMarkets_DuluthSuperior') +
+              nodefactor('VendorMarkets_Unknown') +
+
+             
+             #group affiliation
+             nodefactor('GroupAffiliations_BayfieldFoods') +
+             nodefactor('GroupAffiliations_NorthlandCollegeprograms') +
+             nodefactor('GroupAffiliations_ReCliffCommunityFarm') +
+            
+             
+             #matching group affiliation
+             nodematch('GroupAffiliations_BadRiverFoodSovereignty') +
+             nodematch('GroupAffiliations_BayfieldFoods') +
+             nodematch('GroupAffiliations_InHerBoots', diff=T) +
+             
+             #social media choices
+               nodefactor('SocialMediaChoices_Facebook') +
+               nodefactor('SocialMediaChoices_Instagram') +
+               nodefactor('SocialMediaChoices_None') +
+               nodefactor('SocialMediaChoices_Other') +
+               nodefactor('SocialMediaChoices_Tumblr') +
+
+               nodefactor('SocialMediaChoices_Unknown') 
+
+             
+               
+               ,
+             control=control.ergm(seed=40))
+summary(mod14)
+
+```
+Some of the social media choices are significant, and our model improved again.
+
+```{r}
+modelNames <- c(modelNames, 'mod14')
+modelDescriptions <- c(modelDescriptions, 'Social Media Choices')
+modelAIC <- c(modelAIC, AIC(mod14))
+
+#review AIC
+rm(aicDF)
+aicDF <- data.frame(modelNames, modelDescriptions, modelAIC)
+
+aicDF[order(modelAIC), ]
+
+```
+
+We can also look at matching by social media choice
+
+```{r}
+mod15 <- ergm(collaborateCompleteNet ~ edges +
+            nodecov('IncomePercent')  +
+             nodefactor('Location', levels=c("Town of Clover", "Town of Washburn", "Town of White River")) +
+             nodefactor('PersonalSelfDependence', levels=c( "Unknown")) +
+               nodefactor('CollaborativeEconomicAdvantage', levels=c("Strongly Agree", "Strongly Disagree")) + 
+               nodefactor('CollaborationsNotWorthIt', levels=c("Disagree"))+
+               #roles
+               nodefactor('Roles_FoodSystemsEducator') +
+               nodefactor('Roles_Other') +
+             
+               #roles matching
+              nodematch('Roles_FoodSystemsEducator') +
+               #markets
+              nodefactor('VendorMarkets_DuluthSuperior') +
+              nodefactor('VendorMarkets_Unknown') +
+
+             
+             #group affiliation
+             nodefactor('GroupAffiliations_BayfieldFoods') +
+             nodefactor('GroupAffiliations_NorthlandCollegeprograms') +
+             nodefactor('GroupAffiliations_ReCliffCommunityFarm') +
+            
+             
+             #matching group affiliation
+             nodematch('GroupAffiliations_BadRiverFoodSovereignty') +
+             nodematch('GroupAffiliations_BayfieldFoods') +
+             nodematch('GroupAffiliations_InHerBoots', diff=T) +
+             
+             #social media choices
+               nodefactor('SocialMediaChoices_Facebook') +
+               nodefactor('SocialMediaChoices_Instagram') +
+               nodefactor('SocialMediaChoices_None') +
+               nodefactor('SocialMediaChoices_Other') +
+               nodefactor('SocialMediaChoices_Tumblr') +
+
+               nodefactor('SocialMediaChoices_Unknown')  +
+             
+             #social media choices, matching
+               nodematch('SocialMediaChoices_LinkedIn') 
+              
+
+
+             
+               
+               ,
+             control=control.ergm(seed=40))
+summary(mod15)
+
+```
+
+When considering social media matches, there is one that is significant, Linkedin. Adding it to the model results in our best model yet. 
+
+
+```{r}
+modelNames <- c(modelNames, 'mod15')
+modelDescriptions <- c(modelDescriptions, 'Social Media Matches')
+modelAIC <- c(modelAIC, AIC(mod15))
+
+#review AIC
+rm(aicDF)
+aicDF <- data.frame(modelNames, modelDescriptions, modelAIC)
+
+aicDF[order(modelAIC), ]
+
+```
+
+
+Next, we'll try adding information about where people turned to for advice.
+
+```{r}
+mod16 <- ergm(collaborateCompleteNet ~ edges +
+            nodecov('IncomePercent')  +
+             nodefactor('Location', levels=c("Town of Clover", "Town of Washburn", "Town of White River")) +
+             nodefactor('PersonalSelfDependence', levels=c( "Unknown")) +
+               nodefactor('CollaborativeEconomicAdvantage', levels=c("Strongly Agree", "Strongly Disagree")) + 
+               nodefactor('CollaborationsNotWorthIt', levels=c("Disagree"))+
+               #roles
+               nodefactor('Roles_FoodSystemsEducator') +
+               nodefactor('Roles_Other') +
+             
+               #roles matching
+              nodematch('Roles_FoodSystemsEducator') +
+               #markets
+              nodefactor('VendorMarkets_DuluthSuperior') +
+              nodefactor('VendorMarkets_Unknown') +
+
+             
+             #group affiliation
+             nodefactor('GroupAffiliations_BayfieldFoods') +
+             nodefactor('GroupAffiliations_NorthlandCollegeprograms') +
+             nodefactor('GroupAffiliations_ReCliffCommunityFarm') +
+            
+             
+             #matching group affiliation
+             nodematch('GroupAffiliations_BadRiverFoodSovereignty') +
+             nodematch('GroupAffiliations_BayfieldFoods') +
+             nodematch('GroupAffiliations_InHerBoots', diff=T) +
+             
+             #social media choices
+               nodefactor('SocialMediaChoices_Facebook') +
+               nodefactor('SocialMediaChoices_Instagram') +
+               nodefactor('SocialMediaChoices_None') +
+               nodefactor('SocialMediaChoices_Other') +
+               nodefactor('SocialMediaChoices_Tumblr') +
+
+               nodefactor('SocialMediaChoices_Unknown')  +
+             
+             #social media choices, matching
+               nodematch('SocialMediaChoices_LinkedIn')  +
+               
+               #advice
+             
+             nodefactor('AnswerSources_Other') +
+             nodefactor('AnswerSources_Podcasts') 
+             
+               ,
+             control=control.ergm(seed=40))
+summary(mod16)
+
+```
+
+After testing the significance of answer sources by factor, match, and differentiated match, the only significant variables are podcasts and other. Our AIC again
+
+
+```{r}
+modelNames <- c(modelNames, 'mod16')
+modelDescriptions <- c(modelDescriptions, 'Sources of Advice/Answers')
+modelAIC <- c(modelAIC, AIC(mod16))
+
+#review AIC
+rm(aicDF)
+aicDF <- data.frame(modelNames, modelDescriptions, modelAIC)
+
+aicDF[order(modelAIC), ]
+
+```
+
+
+We have one final variable to add to the model. This one is the distance between two individuals. The variable, when added, is not significant to the overall model, so will not be kept.
+
+```{r}
+#get rid of the label and column names for the distance matrix
+distanceMatrix$Label <- NULL
+colnames(distanceMatrix) <- NULL
+dMatrix <- as.matrix(distanceMatrix)
+```
+```{r}
+mod17 <- ergm(collaborateCompleteNet ~ edges +
+              nodecov('IncomePercent')  +
+             nodefactor('Location', levels=c("Town of Clover", "Town of Washburn", "Town of White River")) +
+             nodefactor('PersonalSelfDependence', levels=c( "Unknown")) +
+               nodefactor('CollaborativeEconomicAdvantage', levels=c("Strongly Agree", "Strongly Disagree")) + 
+               nodefactor('CollaborationsNotWorthIt', levels=c("Disagree"))+
+               #roles
+               nodefactor('Roles_FoodSystemsEducator') +
+               nodefactor('Roles_Other') +
+             
+               #roles matching
+              nodematch('Roles_FoodSystemsEducator') +
+               #markets
+              nodefactor('VendorMarkets_DuluthSuperior') +
+              nodefactor('VendorMarkets_Unknown') +
+
+             
+             #group affiliation
+             nodefactor('GroupAffiliations_BayfieldFoods') +
+             nodefactor('GroupAffiliations_NorthlandCollegeprograms') +
+             nodefactor('GroupAffiliations_ReCliffCommunityFarm') +
+            
+             
+             #matching group affiliation
+             nodematch('GroupAffiliations_BadRiverFoodSovereignty') +
+             nodematch('GroupAffiliations_BayfieldFoods') +
+             nodematch('GroupAffiliations_InHerBoots', diff=T) +
+             
+             #social media choices
+               nodefactor('SocialMediaChoices_Facebook') +
+               nodefactor('SocialMediaChoices_Instagram') +
+               nodefactor('SocialMediaChoices_None') +
+               nodefactor('SocialMediaChoices_Other') +
+               nodefactor('SocialMediaChoices_Tumblr') +
+
+               nodefactor('SocialMediaChoices_Unknown')  +
+             
+             #social media choices, matching
+               nodematch('SocialMediaChoices_LinkedIn')  +
+               
+               #advice
+             
+             nodefactor('AnswerSources_Other') +
+             nodefactor('AnswerSources_Podcasts') +
+               
+             #distance
+             edgecov(dMatrix)
+
+             
+               
+               ,
+             control=control.ergm(seed=40))
+summary(mod17)
+
+
+
+```
+
+
+
+Our best model, then is model 16. 
+
+
+
+
+
+## Goodness of Fit
+```{r}
+mod16.fit <- gof(mod16,
+               GOF = ~distance + espartners +
+              degree + triadcensus,
+              burnin=1e+5, interval = 1e+5, verbose=T )
+mod16.fit
+
+```
+
+
+
+Overall, our model shows a very good fit. Out of all of the parameters reported, none show a p-value under .05. 
+
+We can look at the results of these tests with plots as well.
+
+```{r}
+op <- par(mfrow=c(3,2))
+plot(mod16.fit,cex.axis=1.6,cex.label=1.6)
+par(op)
+
+```
+
+We can also look into full diagnosistics.
+
+```{r}
+#mcmc.diagnostics(mod16)
+```
+Finally, we can simulate a network based on our model and compare it to our observed network.
+
+```{r}
+sim1 <- simulate(mod16, nsim=1, seed=1)
+#summary(sim1,print.adj=FALSE)
+
+op <- par(mfrow=c(2,1))
+my_pal <- addalpha(brewer.pal(4,"Dark2"), .7)
+plot(collaborateCompleteNet,usearrows=FALSE,edge.lwd=0.5,edge.col="grey75",
+     main="Observed Network")
+
+plot(sim1,usearrows=FALSE,edge.lwd=0.5,edge.col="grey75",
+     main="Simulated Network")
+par(op)
+```
+
